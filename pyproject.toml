@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drowsy-cnn"
+version = "0.1.0"
+description = "Taller CNN drowsiness detection — AAIV 2026-II · MIAA-MCD (Icesi)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Luis Manuel Rojas Correa"}, {name = "Dartunduaga"}]
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "timm>=1.0",
+    "albumentations>=1.4",
+    "opencv-python-headless>=4.5",
+    "scikit-learn>=1.3",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "tqdm>=4.65",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "pytest>=8.0", "mypy>=1.10", "pre-commit>=3.5"]
+extra = ["optuna>=3.5", "torchmetrics>=1.2", "netcal>=1.3", "pytorch-grad-cam>=1.5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "PL"]
+ignore = ["PLR0913", "PLR0912", "PLR0915", "N803", "N806", "E501"]
+# N803/N806: uppercase args/vars común en ML (X, Y_hat).
+# PLR: complejidad — ML funciones tienden a ser densas.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "PLC0415"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
