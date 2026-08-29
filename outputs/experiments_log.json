@@ -1,0 +1,33 @@
+[
+  {
+    "name": "p1_custom_baseline",
+    "cfg": {
+      "name": "p1_custom_baseline",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.5,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 25,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 8.399613425845192,
+      "val_acc": 0.42857142857142855,
+      "val_dice": 0.3839686143965948,
+      "epoch": 24
+    }
+  }
+]
