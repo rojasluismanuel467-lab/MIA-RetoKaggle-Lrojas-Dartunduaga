@@ -121,7 +121,7 @@ CKPT_DIR = ROOT / 'checkpoints'; CKPT_DIR.mkdir(exist_ok=True)
 #       §13 (3 backbones), §14 (k-fold sobre top-3), §15 (inference).
 #       Total estimado en CPU: ~2-3 horas.
 # El compañero pone True cuando quiera reproducir todo end-to-end.
-RUN_HEAVY_EXPERIMENTS = False
+RUN_HEAVY_EXPERIMENTS = True
 
 # --- Constantes del problema ---
 IMG_W, IMG_H = 1920, 1080
@@ -1197,7 +1197,7 @@ def kfold_evaluate(exp_names_top3: List[str], n_folds: int = 5) -> pd.DataFrame:
 if RUN_HEAVY_EXPERIMENTS and len(EXPERIMENTS_LOG) >= 3:
     top3 = summary_df().head(3)['name'].tolist()
     print(f"Top-3 candidatos para k-fold: {top3}")
-    kfold_df = kfold_evaluate(top3, n_folds=5)
+    kfold_df = kfold_evaluate(top3, n_folds=3)  # k=3 para caber en tiempo razonable en CPU
     print("\n=== Resultado k-fold ===")
     print(kfold_df.round(4).to_string(index=False))
 else:

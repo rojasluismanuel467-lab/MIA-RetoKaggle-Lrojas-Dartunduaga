@@ -24,10 +24,475 @@
       "num_workers": 0
     },
     "best": {
-      "val_loss": 8.399613425845192,
+      "val_loss": 9.269315537952242,
+      "val_acc": 0.4642857142857143,
+      "val_dice": 0.2802968422571818,
+      "epoch": 0
+    }
+  },
+  {
+    "name": "h1_adam",
+    "cfg": {
+      "name": "h1_adam",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adam",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 6.513662156604585,
+      "val_acc": 0.5357142857142857,
+      "val_dice": 0.5899228595551991,
+      "epoch": 18
+    }
+  },
+  {
+    "name": "h1_adamw",
+    "cfg": {
+      "name": "h1_adamw",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 6.6069381804693315,
+      "val_acc": 0.44047619047619047,
+      "val_dice": 0.5813475563412621,
+      "epoch": 14
+    }
+  },
+  {
+    "name": "h1_sgd",
+    "cfg": {
+      "name": "h1_sgd",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.01,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "sgd",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 9.869368780226935,
+      "val_acc": 0.5595238095238095,
+      "val_dice": 0.2117464542388916,
+      "epoch": 0
+    }
+  },
+  {
+    "name": "h2_wbbox_1",
+    "cfg": {
+      "name": "h2_wbbox_1",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 1.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 1.8385856435412453,
       "val_acc": 0.42857142857142855,
-      "val_dice": 0.3839686143965948,
-      "epoch": 24
+      "val_dice": 0.5990603310721261,
+      "epoch": 18
+    }
+  },
+  {
+    "name": "h2_wbbox_5",
+    "cfg": {
+      "name": "h2_wbbox_5",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 6.261688414074126,
+      "val_acc": 0.4880952380952381,
+      "val_dice": 0.6134268783387684,
+      "epoch": 18
+    }
+  },
+  {
+    "name": "h2_wbbox_10",
+    "cfg": {
+      "name": "h2_wbbox_10",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 10.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 12.705318814232236,
+      "val_acc": 0.4523809523809524,
+      "val_dice": 0.5713220323835101,
+      "epoch": 18
+    }
+  },
+  {
+    "name": "h3_drop_03",
+    "cfg": {
+      "name": "h3_drop_03",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 6.290002482278006,
+      "val_acc": 0.44047619047619047,
+      "val_dice": 0.6115117754255023,
+      "epoch": 18
+    }
+  },
+  {
+    "name": "h3_drop_05",
+    "cfg": {
+      "name": "h3_drop_05",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.5,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 8.772916521344866,
+      "val_acc": 0.42857142857142855,
+      "val_dice": 0.3408081645057315,
+      "epoch": 19
+    }
+  },
+  {
+    "name": "h3_drop_07",
+    "cfg": {
+      "name": "h3_drop_07",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.7,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 8.694152604965936,
+      "val_acc": 0.42857142857142855,
+      "val_dice": 0.3512070860181536,
+      "epoch": 0
+    }
+  },
+  {
+    "name": "p4_aug_none",
+    "cfg": {
+      "name": "p4_aug_none",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "none",
+      "dropout_head": 0.5,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 8.654371352422805,
+      "val_acc": 0.42857142857142855,
+      "val_dice": 0.35472834677923293,
+      "epoch": 19
+    }
+  },
+  {
+    "name": "p4_aug_basic",
+    "cfg": {
+      "name": "p4_aug_basic",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.5,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 9.07592028663272,
+      "val_acc": 0.4642857142857143,
+      "val_dice": 0.3033755677086966,
+      "epoch": 0
+    }
+  },
+  {
+    "name": "p4_aug_strong",
+    "cfg": {
+      "name": "p4_aug_strong",
+      "model_kind": "custom",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "strong",
+      "dropout_head": 0.5,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 20,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 5.258706774030413,
+      "val_acc": 0.42857142857142855,
+      "val_dice": 0.7086146672566732,
+      "epoch": 19
+    }
+  },
+  {
+    "name": "p5_resnet18",
+    "cfg": {
+      "name": "p5_resnet18",
+      "model_kind": "resnet18",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 30,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 3.527618442262922,
+      "val_acc": 0.8452380952380952,
+      "val_dice": 0.8103000777108329,
+      "epoch": 29
+    }
+  },
+  {
+    "name": "p5_mobilenet_v3_small",
+    "cfg": {
+      "name": "p5_mobilenet_v3_small",
+      "model_kind": "mobilenet_v3_small",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 30,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 3.31055938629877,
+      "val_acc": 0.7976190476190477,
+      "val_dice": 0.832114128839402,
+      "epoch": 29
+    }
+  },
+  {
+    "name": "p5_efficientnet_b0",
+    "cfg": {
+      "name": "p5_efficientnet_b0",
+      "model_kind": "efficientnet_b0",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 10,
+      "finetune_epochs": 20,
+      "total_epochs": 30,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0
+    },
+    "best": {
+      "val_loss": 3.0423246792384555,
+      "val_acc": 0.8214285714285714,
+      "val_dice": 0.8468820935203916,
+      "epoch": 29
     }
   }
 ]
