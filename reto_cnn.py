@@ -121,7 +121,12 @@ CKPT_DIR = ROOT / 'checkpoints'; CKPT_DIR.mkdir(exist_ok=True)
 #       §13 (3 backbones), §14 (k-fold sobre top-3), §15 (inference).
 #       Total estimado en CPU: ~2-3 horas.
 # El compañero pone True cuando quiera reproducir todo end-to-end.
-RUN_HEAVY_EXPERIMENTS = True
+RUN_HEAVY_EXPERIMENTS = False
+
+# --- Flag secundario: §16 optimizaciones avanzadas (full-finetune + ensemble + pseudo-label) ---
+# Independiente de RUN_HEAVY_EXPERIMENTS. Requiere que §13 haya corrido antes
+# (los checkpoints p5_*.pt en disco, o cargados desde experiments_log.json).
+RUN_OPTIMIZATION = True
 
 # --- Constantes del problema ---
 IMG_W, IMG_H = 1920, 1080
@@ -428,14 +433,18 @@ class MultitaskLoss(nn.Module):
     """
     Loss combinada: L = w_cls · CE + w_bbox · (SmoothL1 + λ_giou · GIoU_loss)
     Config default estilo DETR (SmoothL1 estable + GIoU mejora convergencia geométrica).
+
+    label_smoothing: regulariza predicciones over-confident (Szegedy et al. 2016,
+    Müller et al. 2019 https://arxiv.org/abs/1906.02629). Típico 0.05-0.1.
     """
     def __init__(self, w_cls: float = 1.0, w_bbox: float = 5.0,
-                 lambda_giou: float = 2.0, class_weights: Optional[torch.Tensor] = None):
+                 lambda_giou: float = 2.0, class_weights: Optional[torch.Tensor] = None,
+                 label_smoothing: float = 0.0):
         super().__init__()
         self.w_cls = w_cls
         self.w_bbox = w_bbox
         self.lambda_giou = lambda_giou
-        self.ce = nn.CrossEntropyLoss(weight=class_weights)
+        self.ce = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
         self.smooth_l1 = nn.SmoothL1Loss()
 
     def forward(self, logits: torch.Tensor, bbox_pred: torch.Tensor,
@@ -683,6 +692,10 @@ class ExpConfig:
     early_stopping_patience: int = 12
     seed: int = SEED
     num_workers: int = 0                   # 0 evita problemas de fork en nbconvert
+    # --- Extensiones para §16 optimizaciones ---
+    label_smoothing: float = 0.0           # 0.05-0.1 típico; regulariza confidence
+    full_finetune: bool = False            # True: descongela TODO el backbone desde el inicio (skip fase A)
+    lr_backbone_full: float = 2e-5         # LR muy bajo para full-finetune (backbone LR = head LR / 25)
 
 
 def make_optimizer(model: nn.Module, cfg: ExpConfig, param_groups=None):
@@ -778,6 +791,7 @@ def train_one_config(cfg: ExpConfig,
     loss_fn = MultitaskLoss(
         w_cls=1.0, w_bbox=cfg.bbox_loss_weight,
         lambda_giou=cfg.lambda_giou, class_weights=cw,
+        label_smoothing=cfg.label_smoothing,
     )
 
     history = []
@@ -813,6 +827,18 @@ def train_one_config(cfg: ExpConfig,
         sched = make_scheduler(opt, cfg, cfg.total_epochs)
         es = EarlyStopping(patience=cfg.early_stopping_patience)
         _run_phase(cfg.total_epochs, 'train', opt, sched, es)
+    elif cfg.full_finetune:
+        # FULL FINETUNE — descongelar TODO desde el inicio, LR diferencial fuerte
+        for p in model.backbone.parameters():
+            p.requires_grad = True
+        opt = torch.optim.AdamW([
+            {'params': model.backbone.parameters(), 'lr': cfg.lr_backbone_full},
+            {'params': list(model.head_cls.parameters()) + list(model.head_bbox.parameters()),
+             'lr': cfg.lr_head},
+        ], weight_decay=cfg.weight_decay)
+        sched = make_scheduler(opt, cfg, cfg.finetune_epochs)
+        es = EarlyStopping(patience=cfg.early_stopping_patience)
+        _run_phase(cfg.finetune_epochs, 'full-ft', opt, sched, es)
     else:
         # FASE A — feature extraction (backbone congelado)
         opt_a = make_optimizer(model, cfg)  # solo params entrenables (heads)
@@ -847,10 +873,21 @@ EXPERIMENTS_LOG: List[Dict] = []
 
 def register(result: Dict) -> None:
     EXPERIMENTS_LOG.append(result)
-    # persistir en disco por si el kernel se muere
-    with open(OUT_DIR / 'experiments_log.json', 'w') as f:
-        json.dump([{'name': r['name'], 'cfg': r['cfg'], 'best': r['best']}
-                   for r in EXPERIMENTS_LOG], f, indent=2)
+    # Persistir en disco MERGEANDO con lo que ya hay (no sobreescribir experimentos previos).
+    json_path = OUT_DIR / 'experiments_log.json'
+    existing = {}
+    if json_path.exists():
+        try:
+            with open(json_path) as f:
+                for r in json.load(f):
+                    existing[r['name']] = r
+        except Exception:
+            pass
+    # Overrides con los actuales en memoria (los nuevos ganan)
+    for r in EXPERIMENTS_LOG:
+        existing[r['name']] = {'name': r['name'], 'cfg': r['cfg'], 'best': r['best']}
+    with open(json_path, 'w') as f:
+        json.dump(list(existing.values()), f, indent=2)
 
 
 def summary_df() -> pd.DataFrame:
@@ -1516,6 +1553,342 @@ if len(EXPERIMENTS_LOG) >= 1:
     print(sub.head())
 else:
     print("(§15 saltado — corre al menos §10 para generar un modelo)")
+
+# %% [markdown]
+# ---
+# ## §16. Optimización avanzada — empujar val_acc > 0.90
+#
+# **Objetivo:** subir la accuracy del ganador (~0.82) combinando 4 técnicas de Kaggle-winner style.
+#
+# | # | Técnica | Ganancia esperada | Fuente |
+# |---|---|---|---|
+# | 1 | Label smoothing 0.1 en CE | +0.5-1% | [Müller et al. 2019](https://arxiv.org/abs/1906.02629) |
+# | 2 | Full fine-tune con LR diferencial (backbone LR = head LR / 25) | +2-4% | Chollet cap 8, práctica DETR |
+# | 3 | Ensemble top-3 backbones (promedio logits + bbox con TTA) | +2-3% | Kaggle winners pattern universal |
+# | 4 | Pseudo-labeling en test (filtrar confidence >0.95, añadir a train, retrain) | +2-5% | [Lee 2013 pseudo-label paper](https://www.researchgate.net/publication/280581078_Pseudo-Label_The_Simple_and_Efficient_Semi-Supervised_Learning_Method_for_Deep_Neural_Networks) |
+#
+# Se ejecuta solo si `RUN_OPTIMIZATION=True` en §1.
+
+# %%
+# --- Cargar experimentos previos desde disco (checkpoints + json) hacia EXPERIMENTS_LOG ---
+# Merge inteligente: solo carga los que NO están ya en memoria y que tienen ckpt en disco.
+# Esto permite reusar §11-13 aunque RUN_HEAVY_EXPERIMENTS=False en esta corrida.
+prev_log_path = OUT_DIR / 'experiments_log.json'
+_present = {r['name'] for r in EXPERIMENTS_LOG}
+if prev_log_path.exists():
+    try:
+        with open(prev_log_path) as f:
+            prev = json.load(f)
+        loaded = 0
+        for r in prev:
+            if r['name'] in _present: continue
+            ckpt = CKPT_DIR / f"{r['name']}.pt"
+            if ckpt.exists():
+                EXPERIMENTS_LOG.append({
+                    'name': r['name'], 'cfg': r['cfg'], 'best': r['best'],
+                    'history': [], 'ckpt': str(ckpt),
+                })
+                loaded += 1
+        print(f"Cargados {loaded} experimentos previos (total en memoria: {len(EXPERIMENTS_LOG)})")
+    except Exception as e:
+        print(f"(Warning: no se pudo cargar log previo: {e})")
+else:
+    print(f"({len(EXPERIMENTS_LOG)} experimentos en memoria, sin log previo en disco)")
+
+# --- Además, escanear checkpoints huérfanos (p5_*, h*_*, p4_* de sesiones anteriores) ---
+# Si un ckpt existe pero no está en el log, intentamos reconstruir su cfg mínimo.
+for ckpt_file in sorted(CKPT_DIR.glob('*.pt')):
+    name = ckpt_file.stem
+    if name in _present or any(r['name'] == name for r in EXPERIMENTS_LOG): continue
+    if name.startswith('timing_'): continue  # ignorar tests
+    if 'fold' in name: continue  # k-fold intermediates
+    # Inferir model_kind del prefijo del nombre
+    if name.startswith('p5_'):
+        kind = name.replace('p5_', '')
+    elif name.startswith('p16_'):
+        kind = name.replace('p16_', '').replace('_full', '').replace('_pseudo', '')
+    else:
+        kind = 'custom'
+    # Rehidratar cfg mínimo (solo lo necesario para reconstruir el modelo)
+    cfg_min = dict(name=name, model_kind=kind, input_size=224, dropout_head=0.3,
+                   batch_size=32, lr_head=1e-3, lr_backbone=1e-4, weight_decay=5e-4,
+                   optimizer='adamw', scheduler='cosine', bbox_loss_weight=5.0,
+                   lambda_giou=2.0, aug_level='basic', use_class_weights=True,
+                   freeze_epochs=10, finetune_epochs=20, total_epochs=25,
+                   early_stopping_patience=12, seed=SEED, num_workers=0,
+                   label_smoothing=0.0, full_finetune=False, lr_backbone_full=2e-5)
+    EXPERIMENTS_LOG.append({
+        'name': name, 'cfg': cfg_min,
+        'best': {'val_loss': float('nan'), 'val_acc': float('nan'),
+                 'val_dice': float('nan'), 'epoch': -1},
+        'history': [], 'ckpt': str(ckpt_file),
+    })
+print(f"Total experimentos disponibles (con ckpt): {len(EXPERIMENTS_LOG)}")
+
+# %% [markdown]
+# ### §16.A — Hallazgo: full fine-tune degrada con dataset chico
+#
+# **Experimento realizado y descartado:** descongelar TODO el backbone (no solo el último stage) con LR
+# diferencial `lr_backbone_full=2e-5` y label smoothing 0.1. Resultados:
+#
+# | Backbone | §13 (freeze + last stage) | §16.A (full-ft) | Δ acc |
+# |---|---|---|---|
+# | ResNet18            | acc=0.845, dice=0.810 | 0.738 / 0.635 | **-0.107** |
+# | MobileNetV3-small   | acc=0.798, dice=0.832 | 0.702 / 0.790 | -0.096 |
+# | EfficientNet-B0     | acc=0.821, dice=0.847 | 0.679 / 0.799 | -0.142 |
+#
+# **Conclusión defendible:** con solo 336 samples, descongelar todo el backbone provoca **catastrophic
+# forgetting** ([McCloskey & Cohen 1989](https://doi.org/10.1016/S0079-7421(08)60536-8)) — el modelo
+# destruye el prior de ImageNet antes de aprender el dominio nuevo. La estrategia freeze+partial-unfreeze
+# de §13 es la correcta para este régimen de datos. **Los ckpt de §13 (`p5_*.pt`) se conservan como los
+# mejores modelos base.**
+#
+# Se preserva el código por si el compañero quiere reproducirlo (cambiar el `if False`).
+
+# %%
+if False:  # descartado — mantener como registro histórico
+    BASE_P16 = dict(
+        aug_level='strong', batch_size=32, full_finetune=True, finetune_epochs=25,
+        lr_head=5e-4, lr_backbone_full=2e-5, label_smoothing=0.1, optimizer='adamw',
+        weight_decay=5e-4, bbox_loss_weight=5.0, lambda_giou=2.0, dropout_head=0.3,
+        early_stopping_patience=10, num_workers=0,
+    )
+    for backbone in ['resnet18', 'mobilenet_v3_small', 'efficientnet_b0']:
+        cfg = ExpConfig(**{**BASE_P16, 'name': f'p16_{backbone}_full', 'model_kind': backbone})
+        register(train_one_config(cfg, df_tr, df_val, verbose=False))
+print("§16.A conclusión: usar los ckpt p5_* de §13 (freeze+partial) como base del ensemble.")
+
+# %% [markdown]
+# ### §16.B — Ensemble top-3 backbones (promedio logits + bbox con TTA hflip)
+
+# %%
+@torch.no_grad()
+def ensemble_predict(model_list: List, df: pd.DataFrame, input_size: int = 224,
+                     use_imagenet_stats: bool = True, batch_size: int = 16,
+                     with_bbox_true: bool = False) -> Dict:
+    """
+    Ensemble por promedio de logits + promedio de bboxes (con TTA hflip por modelo).
+    Devuelve dict con arrays: filenames, probs (N,2), preds (N,), bbox_norm (N,4).
+    Si with_bbox_true=True, también retorna labels y bboxes verdaderos.
+    """
+    tf = build_transforms(input_size, 'none', use_imagenet_stats)
+    if with_bbox_true:
+        ds = DrowsyDataset(df, IMG_DIR, tf, is_test=False)
+    else:
+        ds = DrowsyDataset(df, IMG_DIR, tf, is_test=True)
+    ld = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    all_probs, all_bbox, all_files, all_labels, all_bbox_true = [], [], [], [], []
+    for batch in ld:
+        if with_bbox_true:
+            img, label, bbox_true = batch
+        else:
+            img, fname = batch
+            label, bbox_true = None, None
+        img = img.to(DEVICE)
+        img_flip = torch.flip(img, dims=[-1])
+        # Promediar predicciones de cada modelo (con TTA hflip)
+        batch_logits, batch_bbox = [], []
+        for m in model_list:
+            m.eval()
+            l1, b1 = m(img)
+            l2, b2 = m(img_flip)
+            b2_d = b2.clone(); b2_d[:, 0] = 1.0 - b2[:, 0]
+            batch_logits.append((l1 + l2) / 2)
+            batch_bbox.append((b1 + b2_d) / 2)
+        logits_avg = torch.stack(batch_logits).mean(0)
+        bbox_avg = torch.stack(batch_bbox).mean(0)
+        all_probs.append(F.softmax(logits_avg, dim=1).cpu())
+        all_bbox.append(bbox_avg.cpu())
+        if with_bbox_true:
+            all_labels.append(label); all_bbox_true.append(bbox_true)
+        else:
+            all_files.extend(fname)
+
+    probs = torch.cat(all_probs); bbox = torch.cat(all_bbox)
+    out = dict(probs=probs.numpy(), preds=probs.argmax(1).numpy(),
+               bbox_norm=bbox.numpy())
+    if with_bbox_true:
+        out['labels'] = torch.cat(all_labels).numpy()
+        out['bbox_true'] = torch.cat(all_bbox_true).numpy()
+    else:
+        out['filenames'] = all_files
+    return out
+
+
+def load_model_from_exp(exp: Dict):
+    """Reconstruye modelo + carga checkpoint desde un registro de EXPERIMENTS_LOG."""
+    cfg = ExpConfig(**exp['cfg'])
+    if cfg.model_kind == 'custom':
+        m = CustomCNN(dropout=cfg.dropout_head)
+        use_in = False
+    else:
+        m = build_pretrained(cfg.model_kind, freeze=False)
+        use_in = True
+    m.load_state_dict(torch.load(exp['ckpt'], map_location=DEVICE))
+    m = m.to(DEVICE)
+    return m, use_in
+
+
+if RUN_OPTIMIZATION and len([r for r in EXPERIMENTS_LOG if r['name'].startswith('p5_')]) >= 3:
+    # Cargar los 3 backbones del §13 (freeze+partial, los mejores por §16.A hallazgo)
+    p5_models = [r for r in EXPERIMENTS_LOG if r['name'].startswith('p5_') and 'fold' not in r['name']]
+    p5_top3 = sorted(p5_models, key=lambda x: -x['best']['val_dice'])[:3]
+    # Si el log fue rehidratado y no tiene val_dice, tomar los 3 disponibles
+    if all(math.isnan(r['best']['val_dice']) for r in p5_top3):
+        p5_top3 = p5_models[:3]
+    models_ens = []
+    for exp in p5_top3:
+        m, use_in = load_model_from_exp(exp)
+        models_ens.append(m)
+        vd = exp['best']['val_dice']
+        vd_str = f"{vd:.4f}" if not math.isnan(vd) else "N/A"
+        print(f"  cargado: {exp['name']:30s}  val_dice={vd_str}")
+
+    # Evaluar ensemble sobre val
+    ens_val = ensemble_predict(models_ens, df_val, input_size=224,
+                               use_imagenet_stats=True, with_bbox_true=True)
+    ens_acc = (ens_val['preds'] == ens_val['labels']).mean()
+    bbox_pred_t = torch.tensor(ens_val['bbox_norm'])
+    bbox_true_t = torch.tensor(ens_val['bbox_true'])
+    ens_dice = bbox_dice(bbox_pred_t, bbox_true_t).mean().item()
+
+    print(f"\n=== §16.B ENSEMBLE (top-3 p5_*) sobre val ===")
+    print(f"  val_acc  ensemble = {ens_acc:.4f}")
+    print(f"  val_dice ensemble = {ens_dice:.4f}")
+    for exp in p5_top3:
+        vd = exp['best']['val_dice']; va = exp['best']['val_acc']
+        vd_str = f"{vd:.4f}" if not math.isnan(vd) else "N/A"
+        va_str = f"{va:.4f}" if not math.isnan(va) else "N/A"
+        print(f"    componente {exp['name']:30s} val_acc={va_str}  val_dice={vd_str}")
+
+    # Escribir submission del ensemble
+    ens_test = ensemble_predict(models_ens, df_test, input_size=224, use_imagenet_stats=True)
+    xyxy = cxcywh_norm_to_xyxy(torch.tensor(ens_test['bbox_norm']), IMG_W, IMG_H)
+    xyxy[:, 0::2].clamp_(0, IMG_W); xyxy[:, 1::2].clamp_(0, IMG_H)
+    sub_ens = pd.DataFrame({
+        'filename': ens_test['filenames'],
+        'class': [IDX2CLS[p] for p in ens_test['preds']],
+        'xmin': xyxy[:,0].round().int().tolist(),
+        'ymin': xyxy[:,1].round().int().tolist(),
+        'xmax': xyxy[:,2].round().int().tolist(),
+        'ymax': xyxy[:,3].round().int().tolist(),
+    })
+    sub_ens.to_csv(OUT_DIR / 'submission_ensemble.csv', index=False)
+    print(f"\n✓ submission_ensemble.csv escrita ({len(sub_ens)} filas)")
+else:
+    print("(§16.B saltado — requiere ≥3 modelos p16_* de §16.A)")
+
+# %% [markdown]
+# ### §16.C — Pseudo-labeling en test
+#
+# **Idea:** el ensemble genera predicciones sobre test. Filtramos aquellas con confidence >0.95
+# (predicciones muy seguras) y las añadimos al train como si fueran labels reales. Reentrenamos el
+# mejor modelo con este train aumentado.
+#
+# **Justificación:** el test está *interleaved temporalmente* con el train (mismo video GOPR0492),
+# así que sus frames son muy similares al train — los pseudo-labels serán confiables si la
+# ensemble ya está bien entrenada. Estándar en Kaggle competitions.
+
+# %%
+PSEUDO_CONFIDENCE_THRESHOLD = 0.80  # bajado de 0.95 → 0.80 tras ver que solo 3/106 pasaban 0.95
+
+if RUN_OPTIMIZATION and 'ens_test' in dir():
+    # Filtrar test predictions por confidence
+    max_conf = ens_test['probs'].max(axis=1)
+    keep_mask = max_conf > PSEUDO_CONFIDENCE_THRESHOLD
+    n_pseudo = keep_mask.sum()
+    print(f"Pseudo-labels con confidence > {PSEUDO_CONFIDENCE_THRESHOLD}: {n_pseudo}/{len(ens_test['filenames'])}")
+
+    if n_pseudo >= 20:  # solo vale la pena si hay suficientes
+        # Construir df pseudo con bbox predicho (en pixels)
+        xyxy_p = cxcywh_norm_to_xyxy(torch.tensor(ens_test['bbox_norm']), IMG_W, IMG_H).numpy()
+        pseudo_df = pd.DataFrame({
+            'filename': [f for f, k in zip(ens_test['filenames'], keep_mask) if k],
+            'class':    [IDX2CLS[p] for p, k in zip(ens_test['preds'], keep_mask) if k],
+            'xmin': xyxy_p[keep_mask, 0].round().astype(int).clip(0, IMG_W),
+            'ymin': xyxy_p[keep_mask, 1].round().astype(int).clip(0, IMG_H),
+            'xmax': xyxy_p[keep_mask, 2].round().astype(int).clip(0, IMG_W),
+            'ymax': xyxy_p[keep_mask, 3].round().astype(int).clip(0, IMG_H),
+        })
+        print(f"Distribución pseudo-labels: {pseudo_df['class'].value_counts().to_dict()}")
+
+        # Train aumentado = train original + pseudo
+        df_tr_augmented = pd.concat([df_tr, pseudo_df], ignore_index=True)
+        print(f"Train aumentado: {len(df_tr)} originales + {len(pseudo_df)} pseudo = {len(df_tr_augmented)}")
+
+        # Retrain el mejor modelo de §13 (p5_*) con este train aumentado.
+        # Config gentle: freeze fase + partial unfreeze (misma estrategia que ganó en §13).
+        best_p5 = p5_top3[0]
+        best_cfg_dict = {**best_p5['cfg']}
+        best_cfg_dict['name'] = f"{best_p5['name']}_pseudo"
+        best_cfg_dict['freeze_epochs'] = 5   # ya tenemos base sólida, poco freeze
+        best_cfg_dict['finetune_epochs'] = 20
+        best_cfg_dict['label_smoothing'] = 0.1  # bonus: label smoothing en la nueva corrida
+        cfg_pseudo = ExpConfig(**best_cfg_dict)
+        result_pseudo = train_one_config(cfg_pseudo, df_tr_augmented, df_val, verbose=False)
+        register(result_pseudo)
+        print(f"\n=== §16.C PSEUDO-LABELING resultado ===")
+        print(f"  {result_pseudo['name']}")
+        va_orig = best_p5['best']['val_acc']; vd_orig = best_p5['best']['val_dice']
+        print(f"    val_acc  = {result_pseudo['best']['val_acc']:.4f}  (vs original {va_orig:.4f})" if not math.isnan(va_orig) else f"    val_acc  = {result_pseudo['best']['val_acc']:.4f}")
+        print(f"    val_dice = {result_pseudo['best']['val_dice']:.4f}  (vs original {vd_orig:.4f})" if not math.isnan(vd_orig) else f"    val_dice = {result_pseudo['best']['val_dice']:.4f}")
+
+        # Submission final con este modelo pseudo-entrenado
+        m_pseudo, use_in = load_model_from_exp(result_pseudo)
+        final_test = ensemble_predict([m_pseudo], df_test, 224, True)
+        xyxy_f = cxcywh_norm_to_xyxy(torch.tensor(final_test['bbox_norm']), IMG_W, IMG_H)
+        xyxy_f[:, 0::2].clamp_(0, IMG_W); xyxy_f[:, 1::2].clamp_(0, IMG_H)
+        sub_final = pd.DataFrame({
+            'filename': final_test['filenames'],
+            'class': [IDX2CLS[p] for p in final_test['preds']],
+            'xmin': xyxy_f[:,0].round().int().tolist(),
+            'ymin': xyxy_f[:,1].round().int().tolist(),
+            'xmax': xyxy_f[:,2].round().int().tolist(),
+            'ymax': xyxy_f[:,3].round().int().tolist(),
+        })
+        sub_final.to_csv(OUT_DIR / 'submission_pseudo_final.csv', index=False)
+        print(f"\n✓ submission_pseudo_final.csv escrita")
+    else:
+        print(f"Muy pocos pseudo-labels ({n_pseudo}) — no se aplica.")
+else:
+    print("(§16.C saltado — requiere ens_test de §16.B)")
+
+# %% [markdown]
+# ### §16 — Comparativa final: baseline vs pretrained vs optimizado
+
+# %%
+print("=== EVOLUCIÓN DEL MEJOR MODELO A LO LARGO DEL PIPELINE ===\n")
+milestones = [
+    ('§10 CustomCNN baseline', 'p1_custom_baseline'),
+    ('§13 mejor pretrained (fase A+B)', None),  # se determina
+    ('§16.A mejor full-finetune',      None),
+    ('§16.B ensemble top-3',            None),
+    ('§16.C pseudo-label retrain',     None),
+]
+for label, exp_name in milestones:
+    if exp_name:
+        r = next((e for e in EXPERIMENTS_LOG if e['name'] == exp_name), None)
+        if r: print(f"  {label:38s}  val_acc={r['best']['val_acc']:.4f}  val_dice={r['best']['val_dice']:.4f}")
+    else:
+        # buscar por prefijo
+        if 'pretrained' in label:
+            pool = [e for e in EXPERIMENTS_LOG if e['name'].startswith('p5_')]
+        elif 'full-finetune' in label:
+            pool = [e for e in EXPERIMENTS_LOG if e['name'].startswith('p16_') and 'pseudo' not in e['name']]
+        elif 'pseudo' in label:
+            pool = [e for e in EXPERIMENTS_LOG if 'pseudo' in e['name']]
+        elif 'ensemble' in label:
+            try:
+                print(f"  {label:38s}  val_acc={ens_acc:.4f}  val_dice={ens_dice:.4f}")
+            except NameError:
+                pass
+            continue
+        else:
+            pool = []
+        if pool:
+            r = max(pool, key=lambda x: x['best']['val_dice'])
+            print(f"  {label:38s}  val_acc={r['best']['val_acc']:.4f}  val_dice={r['best']['val_dice']:.4f}  ({r['name']})")
 
 # %% [markdown]
 # ---

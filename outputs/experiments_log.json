@@ -21,12 +21,15 @@
       "total_epochs": 25,
       "early_stopping_patience": 12,
       "seed": 42,
-      "num_workers": 0
+      "num_workers": 0,
+      "label_smoothing": 0.0,
+      "full_finetune": false,
+      "lr_backbone_full": 2e-05
     },
     "best": {
-      "val_loss": 9.269315537952242,
-      "val_acc": 0.4642857142857143,
-      "val_dice": 0.2802968422571818,
+      "val_loss": 8.91982346489316,
+      "val_acc": 0.5357142857142857,
+      "val_dice": 0.3233824570973714,
       "epoch": 0
     }
   },
@@ -493,6 +496,40 @@
       "val_acc": 0.8214285714285714,
       "val_dice": 0.8468820935203916,
       "epoch": 29
+    }
+  },
+  {
+    "name": "p5_efficientnet_b0_pseudo",
+    "cfg": {
+      "name": "p5_efficientnet_b0_pseudo",
+      "model_kind": "efficientnet_b0",
+      "input_size": 224,
+      "batch_size": 32,
+      "lr_head": 0.001,
+      "lr_backbone": 0.0001,
+      "weight_decay": 0.0005,
+      "optimizer": "adamw",
+      "scheduler": "cosine",
+      "bbox_loss_weight": 5.0,
+      "lambda_giou": 2.0,
+      "aug_level": "basic",
+      "dropout_head": 0.3,
+      "use_class_weights": true,
+      "freeze_epochs": 5,
+      "finetune_epochs": 20,
+      "total_epochs": 30,
+      "early_stopping_patience": 12,
+      "seed": 42,
+      "num_workers": 0,
+      "label_smoothing": 0.1,
+      "full_finetune": false,
+      "lr_backbone_full": 2e-05
+    },
+    "best": {
+      "val_loss": 3.067582062312535,
+      "val_acc": 0.7976190476190477,
+      "val_dice": 0.8507716315133231,
+      "epoch": 24
     }
   }
 ]
