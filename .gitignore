@@ -1,0 +1,52 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Referencias de libros (solo uso local, no subir)
+references/
+
+# Datos de Kaggle (pueden ser pesados)
+data/
+*.zip
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.ipynb_checkpoints/
+
+# Jupyter
+.jupyter/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Credenciales Kaggle
+kaggle.json
+.kaggle/
+
+# Modelos entrenados (pesados)
+*.pt
+*.pth
+*.h5
+*.keras
+*.pkl
+models/checkpoints/
+
+# Logs
+*.log
+runs/
+lightning_logs/
+wandb/
