@@ -108,12 +108,29 @@ if torch.cuda.is_available():
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# --- Rutas ---
-ROOT = Path('.').resolve()
-DATA_DIR = ROOT / 'data'
-IMG_DIR  = DATA_DIR / 'images'
-OUT_DIR  = ROOT / 'outputs'; OUT_DIR.mkdir(exist_ok=True)
-CKPT_DIR = ROOT / 'checkpoints'; CKPT_DIR.mkdir(exist_ok=True)
+# --- Detección Kaggle vs local + optimización CPU ---
+IS_KAGGLE = Path('/kaggle/input').exists() or 'KAGGLE_KERNEL_RUN_TYPE' in os.environ
+if IS_KAGGLE:
+    _kg_inputs = list(Path('/kaggle/input').iterdir())
+    DATA_DIR = _kg_inputs[0] if _kg_inputs else Path('/kaggle/input')
+    IMG_DIR  = DATA_DIR / 'images'
+    OUT_DIR  = Path('/kaggle/working');       OUT_DIR.mkdir(parents=True, exist_ok=True)
+    CKPT_DIR = OUT_DIR / 'checkpoints';       CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"→ Detectado entorno Kaggle. DATA_DIR = {DATA_DIR}")
+else:
+    ROOT = Path('.').resolve()
+    DATA_DIR = ROOT / 'data'
+    IMG_DIR  = DATA_DIR / 'images'
+    OUT_DIR  = ROOT / 'outputs';    OUT_DIR.mkdir(exist_ok=True)
+    CKPT_DIR = ROOT / 'checkpoints';CKPT_DIR.mkdir(exist_ok=True)
+    print(f"→ Entorno local. ROOT = {ROOT}")
+
+# Aprovechar todos los cores CPU + MKL-DNN (aceleración Intel)
+_n_threads = os.cpu_count() or 1
+torch.set_num_threads(_n_threads)
+if hasattr(torch.backends, 'mkldnn'):
+    torch.backends.mkldnn.enabled = True
+print(f"→ CPU threads = {_n_threads}, MKL-DNN habilitado")
 
 # --- Flag maestro: correr o no los experimentos pesados de §11-15 ---
 # False (default): al hacer "Run All" solo corre §10 baseline (~5 min).
@@ -298,25 +315,46 @@ def build_transforms(input_size: int = 224,
                      aug_level: str = 'basic',
                      use_imagenet_stats: bool = True) -> A.Compose:
     """
-    aug_level: 'none' | 'basic' | 'strong'
-    - none:   solo resize + normalize (baseline)
-    - basic:  + HorizontalFlip + RandomBrightnessContrast (Chollet cap 8)
-    - strong: + ShiftScaleRotate + HueSaturation + GaussNoise + MotionBlur
-             (frames GoPro tienen ese tipo de ruido / iluminación variable)
-    Referencia: albumentations docs oficiales.
+    aug_level:
+      - none:             solo resize + normalize (baseline, val/test)
+      - basic:            + HorizontalFlip + RandomBrightnessContrast (Chollet cap 8)
+      - strong:           + Affine ±10° + HueSat + GaussNoise + MotionBlur
+      - cabin_realistic:  strong + shadows + sun flare + gamma amplio + oclusiones
+                          (robustez a iluminación variable, túneles, gafas/gorras)
+
+    Referencias: albumentations v2 docs, Yu et al. 2019 (condition-adaptive),
+    DrowsyDetectNet 2024 (CLAHE), YOLO-FDCL 2025 (complex lighting).
     """
     mean = IMAGENET_MEAN if use_imagenet_stats else TRAIN_MEAN
     std  = IMAGENET_STD  if use_imagenet_stats else TRAIN_STD
 
     ops: List = []
-    if aug_level in ('basic', 'strong'):
+    if aug_level in ('basic', 'strong', 'cabin_realistic'):
         ops.append(A.HorizontalFlip(p=0.5))
         ops.append(A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5))
-    if aug_level == 'strong':
-        ops.append(A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, p=0.5))
-        ops.append(A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.5))
-        ops.append(A.GaussNoise(var_limit=(10, 30), p=0.3))
+    if aug_level in ('strong', 'cabin_realistic'):
+        ops.append(A.Affine(translate_percent=(-0.05, 0.05), scale=(0.9, 1.1),
+                            rotate=(-10, 10), p=0.5))
+        ops.append(A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15,
+                                         val_shift_limit=10, p=0.5))
+        ops.append(A.GaussNoise(std_range=(0.04, 0.15), p=0.3))
         ops.append(A.MotionBlur(blur_limit=5, p=0.3))
+    if aug_level == 'cabin_realistic':
+        # 1. Variabilidad temporal (hora del día): gamma amplio + brightness extremo + CLAHE
+        ops.append(A.RandomGamma(gamma_limit=(60, 160), p=0.4))
+        ops.append(A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.3, p=0.4))
+        ops.append(A.CLAHE(clip_limit=3.0, p=0.3))
+        ops.append(A.ColorJitter(brightness=0.3, contrast=0.2, saturation=0.2, hue=0.05, p=0.3))
+        # 2. Túneles y contraluz: sombras + sun flare
+        ops.append(A.RandomShadow(shadow_roi=(0, 0, 1, 1), num_shadows_limit=(1, 3), p=0.4))
+        ops.append(A.RandomSunFlare(flare_roi=(0, 0, 1, 0.5),
+                                     num_flare_circles_range=(1, 3), src_radius=100, p=0.15))
+        # 3. Oclusiones (gafas, gorras, mascarillas)
+        ops.append(A.CoarseDropout(num_holes_range=(1, 3), hole_height_range=(12, 32),
+                                    hole_width_range=(16, 48), p=0.4))
+        # 4. Robustez perceptual (compresión JPEG + downsampling)
+        ops.append(A.ImageCompression(quality_range=(75, 95), p=0.3))
+        ops.append(A.Downscale(scale_range=(0.75, 0.95), p=0.2))
     ops += [
         A.Resize(input_size, input_size),
         A.Normalize(mean=mean, std=std),
@@ -2498,6 +2536,169 @@ if RUN_OPTIMIZATION:
 # | §16.B ensemble simple | 0.845 | 0.874 |
 # | §17.D mega v2 (weighted + multi-scale) | 0.869 | 0.879 |
 # | **§18 two-stage** | **0.988** | 0.879 |
+
+# %% [markdown]
+# ---
+# ## §19. Matriz de robustez — cómo se comporta el modelo bajo condiciones adversas
+#
+# **Motivación:** el val_acc del §18 (0.988) se mide sobre imágenes del mismo video con
+# condiciones controladas. En producción real el conductor puede estar en un túnel, con
+# gafas de sol, con sombra de la visera, etc. Esta sección aplica **10 condiciones sintéticas**
+# a las imágenes del val set y reporta accuracy bajo cada una — evidencia dura para la
+# sustentación de que el modelo (o no) generaliza al caso real.
+#
+# **Fuentes:**
+# - Yu et al. 2019 [arxiv:1910.09722](https://arxiv.org/abs/1910.09722) — condition-adaptive drowsiness
+# - Song et al. 2019 [arxiv:1908.06290](https://arxiv.org/abs/1908.06290) — occlusion-robust face recognition
+# - Anwar 2020 [MaskTheFace arxiv:2008.11104](https://arxiv.org/abs/2008.11104) — mask augmentation
+# - YOLO-FDCL 2025 (MDPI) — complex lighting conditions for driver detection
+
+# %%
+ROBUSTNESS_CONDITIONS = {
+    'baseline_clean':          A.Compose([]),
+    'dark_tunnel':             A.Compose([
+        A.RandomGamma(gamma_limit=(30, 60), p=1.0),
+        A.RandomBrightnessContrast(brightness_limit=(-0.5, -0.3), contrast_limit=0, p=1.0),
+    ]),
+    'backlight_sunset':        A.Compose([
+        A.RandomGamma(gamma_limit=(140, 180), p=1.0),
+        A.RandomSunFlare(flare_roi=(0, 0, 1, 0.4), num_flare_circles_range=(2, 4),
+                         src_radius=150, p=1.0),
+    ]),
+    'night_lowlight':          A.Compose([
+        A.RandomBrightnessContrast(brightness_limit=(-0.6, -0.4),
+                                    contrast_limit=(-0.3, -0.1), p=1.0),
+        A.GaussNoise(std_range=(0.1, 0.2), p=1.0),
+    ]),
+    'pillar_shadows':          A.Compose([
+        A.RandomShadow(shadow_roi=(0, 0, 1, 1), num_shadows_limit=(2, 4), p=1.0),
+    ]),
+    'sunglasses_occlusion':    A.Compose([
+        A.CoarseDropout(num_holes_range=(1, 2), hole_height_range=(15, 25),
+                        hole_width_range=(40, 60), p=1.0),
+    ]),
+    'cap_shadow_forehead':     A.Compose([
+        A.CoarseDropout(num_holes_range=(1, 1), hole_height_range=(20, 30),
+                        hole_width_range=(80, 120), p=1.0),
+    ]),
+    'mask_lower_face':         A.Compose([
+        A.CoarseDropout(num_holes_range=(1, 1), hole_height_range=(25, 35),
+                        hole_width_range=(60, 100), p=1.0),
+    ]),
+    'motion_blur_heavy':       A.Compose([A.MotionBlur(blur_limit=15, p=1.0)]),
+    'compression_low_quality': A.Compose([A.ImageCompression(quality_range=(20, 40), p=1.0)]),
+}
+
+
+class RobustnessDataset(Dataset):
+    """Envuelve una imagen ya recortada y aplica una condición sintética antes del transform."""
+    def __init__(self, df, img_dir, condition_transform, final_transform, margin=0.15):
+        self.df = df.reset_index(drop=True); self.img_dir = Path(img_dir)
+        self.cond = condition_transform; self.tf = final_transform; self.margin = margin
+
+    def __len__(self): return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        img = cv2.cvtColor(cv2.imread(str(self.img_dir / row['filename'])), cv2.COLOR_BGR2RGB)
+        H, W = img.shape[:2]
+        bw = row.xmax - row.xmin; bh = row.ymax - row.ymin
+        mx, my = bw * self.margin, bh * self.margin
+        x1 = int(max(0, row.xmin - mx)); y1 = int(max(0, row.ymin - my))
+        x2 = int(min(W, row.xmax + mx)); y2 = int(min(H, row.ymax + my))
+        crop = img[y1:y2, x1:x2] if (x2 > x1 and y2 > y1) else img
+        # Aplicar condición → luego resize/normalize
+        cond_out = self.cond(image=crop)
+        out = self.tf(image=cond_out['image'])
+        return out['image'], torch.tensor(CLS2IDX[row['class']], dtype=torch.long)
+
+
+@torch.no_grad()
+def evaluate_robustness(crop_model, df_val_with_predicted_bbox) -> pd.DataFrame:
+    """Aplica cada condición a df_val (con bbox ya predicho) y mide acc del crop_model."""
+    crop_model.eval()
+    tf_final = build_transform_crop(224, 'none')
+    rows = []
+    for cond_name, cond_tf in ROBUSTNESS_CONDITIONS.items():
+        ds = RobustnessDataset(df_val_with_predicted_bbox, IMG_DIR, cond_tf, tf_final)
+        ld = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0)
+        correct = total = 0
+        for img, lab in ld:
+            img, lab = img.to(DEVICE), lab.to(DEVICE)
+            l1 = crop_model(img); l2 = crop_model(torch.flip(img, dims=[-1]))
+            probs = F.softmax((l1 + l2) / 2, dim=1)
+            correct += (probs.argmax(1) == lab).sum().item()
+            total += lab.size(0)
+        rows.append({'condition': cond_name, 'val_acc': correct/total, 'n': total})
+    return pd.DataFrame(rows).set_index('condition')
+
+
+# Si crop_model y df_val_predicted ya existen (§18 acaba de correr), reusa.
+# Si no, carga el checkpoint p18_crop_classifier.pt de disco y regenera df_val_predicted.
+_p18_ckpt = CKPT_DIR / 'p18_crop_classifier.pt'
+_can_run_robustness = False
+if 'crop_model' in dir() and 'df_val_predicted' in dir():
+    _can_run_robustness = True
+elif _p18_ckpt.exists():
+    print(f"Cargando crop classifier desde {_p18_ckpt.name}...")
+    crop_model = CropClassifier(dropout=0.3).to(DEVICE)
+    crop_model.load_state_dict(torch.load(_p18_ckpt, map_location=DEVICE))
+    # Regenerar bboxes val con stage1 (los mismos p5_* + snapshots)
+    stage1_names = [('p5_resnet18', 'resnet18'),
+                    ('p5_mobilenet_v3_small', 'mobilenet_v3_small'),
+                    ('p5_efficientnet_b0', 'efficientnet_b0'),
+                    ('p17_effnet_snapshot_snap0', 'efficientnet_b0'),
+                    ('p17_effnet_snapshot_snap1', 'efficientnet_b0'),
+                    ('p17_effnet_snapshot_snap2', 'efficientnet_b0')]
+    stage1_models = []
+    for name, kind in stage1_names:
+        p = CKPT_DIR / f'{name}.pt'
+        if not p.exists(): continue
+        m = build_pretrained(kind, freeze=False)
+        m.load_state_dict(torch.load(p, map_location=DEVICE))
+        stage1_models.append(m.to(DEVICE))
+    if stage1_models:
+        print(f"Predicting bboxes val con {len(stage1_models)} modelos stage1...")
+        val_bb = stage1_predict_bboxes(stage1_models, df_val, is_test=False)
+        df_val_predicted = df_val.copy()
+        df_val_predicted[['xmin','ymin','xmax','ymax']] = val_bb.round().astype(int)
+        _can_run_robustness = True
+
+if _can_run_robustness:
+    print("Evaluando matriz de robustez sobre 10 condiciones sintéticas...")
+    robustness_df = evaluate_robustness(crop_model, df_val_predicted)
+    print(f"\n=== §19 MATRIZ DE ROBUSTEZ (crop classifier ganador) ===")
+    print(robustness_df.round(4).sort_values('val_acc', ascending=False).to_string())
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+    robustness_df.sort_values('val_acc').plot.barh(y='val_acc', ax=ax, legend=False, color='steelblue')
+    ax.axvline(x=0.5, color='red', linestyle='--', alpha=0.5, label='azar (0.5)')
+    ax.axvline(x=robustness_df.loc['baseline_clean', 'val_acc'], color='green',
+               linestyle='--', alpha=0.5, label='baseline_clean')
+    ax.set_xlabel('val_acc'); ax.set_title('Robustez a condiciones de cabina reales')
+    ax.legend(); plt.tight_layout(); plt.show()
+    # Guardar CSV
+    robustness_df.to_csv(OUT_DIR / 'robustness_matrix.csv')
+    print(f"✓ robustness_matrix.csv escrita a {OUT_DIR}")
+else:
+    print("(§19 saltado — no hay crop_model ni p18_crop_classifier.pt en checkpoints/)")
+
+# %% [markdown]
+# ### §19.B — Interpretación de la matriz
+#
+# **Cómo defender los resultados en la sustentación:**
+# - `baseline_clean` es la referencia (0.988 esperado).
+# - Caídas de <5pp = **modelo robusto** a esa condición.
+# - Caídas de 5-15pp = **degradación aceptable**, mencionar como límite conocido.
+# - Caídas >15pp = **debilidad crítica**, mencionar como trabajo futuro.
+#
+# **Recomendaciones defensivas ante fallos:**
+# - Si falla en `sunglasses_occlusion`: mencionar que el dataset no tiene gafas — se resolvería
+#   con augmentación con MaskTheFace o datasets NTHU-DDD que sí incluyen gafas.
+# - Si falla en `dark_tunnel`: mencionar que la industria usa NIR + iluminación activa 850nm
+#   (Aptiv, Smart Eye) — solución de hardware.
+# - Si falla en `night_lowlight`: entrenar con augmentación Retinex (Sensors 2022) o data
+#   nocturna real.
 
 # %% [markdown]
 # ---
