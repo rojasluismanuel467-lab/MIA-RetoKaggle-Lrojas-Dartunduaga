@@ -138,7 +138,7 @@ print(f"→ CPU threads = {_n_threads}, MKL-DNN habilitado")
 #       §13 (3 backbones), §14 (k-fold sobre top-3), §15 (inference).
 #       Total estimado en CPU: ~2-3 horas.
 # El compañero pone True cuando quiera reproducir todo end-to-end.
-RUN_HEAVY_EXPERIMENTS = False
+RUN_HEAVY_EXPERIMENTS = True
 
 # --- Flag secundario: §16 optimizaciones avanzadas (full-finetune + ensemble + pseudo-label) ---
 # Independiente de RUN_HEAVY_EXPERIMENTS. Requiere que §13 haya corrido antes
