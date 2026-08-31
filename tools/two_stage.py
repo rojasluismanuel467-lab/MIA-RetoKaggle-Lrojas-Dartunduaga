@@ -25,6 +25,9 @@ from albumentations.pytorch import ToTensorV2
 import timm
 from sklearn.model_selection import train_test_split
 
+from drowsy_cnn.checkpoints import load_checkpoint
+from drowsy_cnn.config import resolve_device
+
 warnings.filterwarnings('ignore')
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'data'
@@ -38,7 +41,7 @@ CLASSES = ['awake', 'drowsy']
 CLS2IDX = {c: i for i, c in enumerate(CLASSES)}
 IDX2CLS = {i: c for c, i in CLS2IDX.items()}
 IMAGENET_MEAN = [0.485, 0.456, 0.406]; IMAGENET_STD = [0.229, 0.224, 0.225]
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = resolve_device()
 print(f"Device: {DEVICE}")
 
 
@@ -184,7 +187,7 @@ def load_stage1_models():
         p = CKPT_DIR / f'{name}.pt'
         if not p.exists(): continue
         m = build_pretrained(kind).to(DEVICE)
-        m.load_state_dict(torch.load(p, map_location=DEVICE))
+        load_checkpoint(m, p, DEVICE)
         ms.append(m)
     return ms
 

@@ -19,6 +19,9 @@ from albumentations.pytorch import ToTensorV2
 import timm
 from sklearn.model_selection import train_test_split
 
+from drowsy_cnn.checkpoints import load_checkpoint
+from drowsy_cnn.config import resolve_device
+
 warnings.filterwarnings('ignore')
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'data'
@@ -32,7 +35,7 @@ CLS2IDX = {c: i for i, c in enumerate(CLASSES)}
 IDX2CLS = {i: c for c, i in CLS2IDX.items()}
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = resolve_device()
 
 
 def build_transforms(size, use_imagenet_stats=True):
@@ -139,7 +142,7 @@ for name, kind in CKPT_LIST:
     path = CKPT_DIR / f'{name}.pt'
     if not path.exists(): print(f"  ⚠ falta {path.name}, skip"); continue
     m = build_pretrained(kind).to(DEVICE)
-    m.load_state_dict(torch.load(path, map_location=DEVICE))
+    load_checkpoint(m, path, DEVICE)
     models_list.append(m); names.append(name)
 print(f"Modelos cargados: {len(models_list)}")
 

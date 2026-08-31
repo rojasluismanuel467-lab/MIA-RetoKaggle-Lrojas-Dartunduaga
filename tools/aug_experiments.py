@@ -35,6 +35,9 @@ from albumentations.pytorch import ToTensorV2
 import timm
 from sklearn.model_selection import train_test_split
 
+from drowsy_cnn.checkpoints import load_checkpoint
+from drowsy_cnn.config import resolve_device
+
 warnings.filterwarnings('ignore')
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'data'
@@ -48,7 +51,7 @@ CLASSES = ['awake', 'drowsy']
 CLS2IDX = {c: i for i, c in enumerate(CLASSES)}
 IDX2CLS = {i: c for c, i in CLS2IDX.items()}
 IMAGENET_MEAN = [0.485, 0.456, 0.406]; IMAGENET_STD = [0.229, 0.224, 0.225]
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = resolve_device()
 
 
 # ==== Reuso de las clases del two_stage.py ====
@@ -284,7 +287,7 @@ for name, kind in STAGE1_LIST:
     p = CKPT_DIR / f'{name}.pt'
     if not p.exists(): continue
     m = build_pretrained(kind).to(DEVICE)
-    m.load_state_dict(torch.load(p, map_location=DEVICE))
+    load_checkpoint(m, p, DEVICE)
     stage1.append(m)
 val_bb = stage1_predict_bboxes(stage1, df_val, is_test=False)
 df_val_pred = df_val.copy(); df_val_pred[['xmin','ymin','xmax','ymax']] = val_bb.round().astype(int)
@@ -322,7 +325,7 @@ if best_val >= 0.9881:
     # Cargar el mejor y generar submission
     ckpt = CKPT_DIR / f'p19_crop_{best_strat[0]}.pt'
     model_best = CropClassifier(dropout=0.3).to(DEVICE)
-    model_best.load_state_dict(torch.load(ckpt, map_location=DEVICE))
+    load_checkpoint(model_best, ckpt, DEVICE)
     # Predecir bboxes test
     test_bb = stage1_predict_bboxes(stage1, df_test, is_test=True)
     df_test_pred = df_test.copy(); df_test_pred['class'] = 'awake'

@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .augmentation import build_transforms
+from .checkpoints import load_checkpoint
 from .config import CKPT_DIR, DEVICE, IDX2CLS, IMG_DIR, IMG_H, IMG_W, ExpConfig
 from .dataset import DrowsyDataset, cxcywh_norm_to_xyxy
 from .models import CustomCNN, build_pretrained
@@ -31,7 +32,7 @@ def load_model_from_result(exp: dict) -> tuple[torch.nn.Module, bool]:
     else:
         model = build_pretrained(cfg.model_kind, freeze=False, dropout_head=cfg.dropout_head)
         use_imagenet_stats = True
-    model.load_state_dict(torch.load(exp["ckpt"], map_location=DEVICE))
+    load_checkpoint(model, exp["ckpt"], DEVICE)
     return model.to(DEVICE), use_imagenet_stats
 
 
@@ -207,7 +208,7 @@ def load_stage1_models(names_and_kinds: list[tuple[str, str]]) -> list[torch.nn.
         if not ckpt.exists():
             continue
         model = build_pretrained(kind, freeze=False)
-        model.load_state_dict(torch.load(ckpt, map_location=DEVICE))
+        load_checkpoint(model, ckpt, DEVICE)
         loaded.append(model.to(DEVICE))
     return loaded
 

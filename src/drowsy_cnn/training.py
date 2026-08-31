@@ -17,6 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .augmentation import build_transforms
+from .checkpoints import load_checkpoint, save_checkpoint
 from .config import CKPT_DIR, CLASSES, DEVICE, IMG_DIR, N_CLASSES, ExpConfig
 from .dataset import DrowsyDataset
 from .losses import EarlyStopping, MultitaskLoss, bbox_dice
@@ -157,6 +158,27 @@ def train_one_config(
         model = build_pretrained(cfg.model_kind, dropout_head=cfg.dropout_head, freeze=True)
     model = model.to(DEVICE)
 
+    ckpt_path = CKPT_DIR / f"{cfg.name}.pt"
+    if cfg.reuse_checkpoint and ckpt_path.exists():
+        try:
+            payload = load_checkpoint(model, ckpt_path, DEVICE)
+            best = payload.get(
+                "best", dict(val_loss=math.nan, val_acc=math.nan, val_dice=math.nan, epoch=-1)
+            )
+            history = payload.get("history", [])
+            if verbose:
+                print(f"  ↳ checkpoint reutilizado: {ckpt_path}")
+            return dict(
+                name=cfg.name,
+                cfg=asdict(cfg),
+                history=history,
+                best=best,
+                ckpt=str(ckpt_path),
+            )
+        except (RuntimeError, KeyError, TypeError, ValueError) as exc:
+            if verbose:
+                print(f"  ↳ checkpoint incompatible; se reentrena ({exc})")
+
     class_weights = (
         compute_class_weights(df_train_split).to(DEVICE) if cfg.use_class_weights else None
     )
@@ -170,8 +192,6 @@ def train_one_config(
 
     history: list[dict] = []
     best = dict(val_loss=math.inf, val_acc=0.0, val_dice=0.0, epoch=-1)
-    ckpt_path = CKPT_DIR / f"{cfg.name}.pt"
-
     def _run_phase(
         n_epochs: int,
         phase_label: str,
@@ -207,7 +227,7 @@ def train_one_config(
                     val_dice=val_metrics["dice"],
                     epoch=len(history) - 1,
                 )
-                torch.save(model.state_dict(), ckpt_path)
+                save_checkpoint(model, ckpt_path, asdict(cfg), best, history)
             if early_stopper.step(val_metrics["loss"]):
                 if verbose:
                     print(

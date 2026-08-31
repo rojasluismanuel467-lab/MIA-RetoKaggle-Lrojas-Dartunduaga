@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from drowsy_cnn.config import CKPT_DIR, DATA_DIR, DEVICE, IMG_DIR, IMG_H, IMG_W, SEED
+from drowsy_cnn.checkpoints import load_checkpoint
 from drowsy_cnn.dataset import DrowsyDataset, cxcywh_norm_to_xyxy
 from drowsy_cnn.inference import load_stage1_models, stage1_predict_bboxes
 from drowsy_cnn.models import CropClassifier
@@ -100,8 +101,7 @@ def main() -> None:
     # 3. Cargar crop classifier (§18)
     print("\nCargando crop classifier del §18...")
     crop_model = CropClassifier(dropout=0.3).to(DEVICE)
-    crop_model.load_state_dict(torch.load(CKPT_DIR / "p18_crop_classifier.pt",
-                                          map_location=DEVICE, weights_only=True))
+    load_checkpoint(crop_model, CKPT_DIR / "p18_crop_classifier.pt", DEVICE)
 
     # 4. Evaluar cada condición
     print(f"\nEvaluando {len(CONDITION_TRANSFORMS)} condiciones sintéticas:")
