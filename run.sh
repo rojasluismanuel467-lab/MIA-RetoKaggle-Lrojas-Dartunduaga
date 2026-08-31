@@ -34,9 +34,19 @@ elif [ "${1:-}" = "--tmux" ]; then
 fi
 
 # Estimación de tiempo
-GPU_OK=$(python -c 'import torch; print(int(torch.cuda.is_available()))')
-if [ "$GPU_OK" = "1" ]; then
+ACCELERATOR=$(python -c '
+import torch
+if torch.cuda.is_available():
+    print("cuda")
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    print("mps")
+else:
+    print("cpu")
+')
+if [ "$ACCELERATOR" = "cuda" ]; then
     log "GPU detectada — corrida estimada: ~15-30 min"
+elif [ "$ACCELERATOR" = "mps" ]; then
+    log "GPU Apple MPS detectada — corrida estimada: ~20-45 min"
 else
     warn "Sin GPU — corrida estimada: ~2-4 horas"
 fi

@@ -88,8 +88,11 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         CUDA_VERSION=""
     fi
 else
-    warn "Sin GPU NVIDIA detectada. Se instalará PyTorch CPU-only."
-    warn "Si tienes AMD GPU o Apple Silicon avísame para adaptar."
+    if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+        ok "Apple Silicon detectado — se instalará PyTorch con soporte MPS"
+    else
+        warn "Sin GPU NVIDIA detectada. Se usará CPU (o el acelerador disponible)."
+    fi
 fi
 
 # ============================================================================
@@ -114,7 +117,10 @@ python -m pip install --quiet --upgrade pip
 # 4. Instalar PyTorch (con o sin CUDA) + paquete + deps
 # ============================================================================
 log "Instalando PyTorch…"
-if [ -n "$CUDA_VERSION" ]; then
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    # En Apple Silicon PyTorch puede usar MPS; no forzar el índice CPU de Linux.
+    pip install --quiet torch torchvision
+elif [ -n "$CUDA_VERSION" ]; then
     pip install --quiet torch torchvision --index-url "https://download.pytorch.org/whl/${CUDA_VERSION}"
 else
     pip install --quiet torch torchvision --index-url "https://download.pytorch.org/whl/cpu"
@@ -139,7 +145,9 @@ KAGGLE_TOKEN_FILE="$KAGGLE_CFG_DIR/access_token"
 
 mkdir -p "$KAGGLE_CFG_DIR"
 
-if [ -f "$KAGGLE_JSON" ] || [ -f "$KAGGLE_TOKEN_FILE" ]; then
+if [ -n "${KAGGLE_API_TOKEN:-}" ]; then
+    ok "Credenciales Kaggle detectadas en KAGGLE_API_TOKEN"
+elif [ -f "$KAGGLE_JSON" ] || [ -f "$KAGGLE_TOKEN_FILE" ]; then
     ok "Credenciales Kaggle ya configuradas"
 else
     warn "No hay credenciales Kaggle. Opciones:"
@@ -148,7 +156,8 @@ else
     echo "  C) Saltar (podrás correr el pipeline con datos que ya tengas en data/)"
     echo -n "Elige [A/B/C]: "
     read -r CHOICE
-    case "${CHOICE^^}" in
+    CHOICE_UPPER=$(printf '%s' "$CHOICE" | tr '[:lower:]' '[:upper:]')
+    case "$CHOICE_UPPER" in
         A)
             echo "Pega el JSON completo (una línea) y presiona Enter:"
             read -r JSON_CONTENT
@@ -182,13 +191,27 @@ if [ -z "${SKIP_DATASET:-}" ]; then
         if kaggle competitions download -c aaiv-2026-ii-taller-cnn-miaa-mcd -p data/ 2>&1; then
             log "Descomprimiendo…"
             cd data
-            for z in *.zip; do
-                [ -f "$z" ] || continue
-                unzip -q -o "$z"
-                rm "$z"
+            # La competencia puede entregar un ZIP externo que contiene images.zip.
+            # Repetir hasta eliminar todos los niveles de compresión.
+            while find . -maxdepth 1 -type f -name '*.zip' -print -quit | grep -q .; do
+                for z in ./*.zip; do
+                    [ -f "$z" ] || continue
+                    if [ "$(basename "$z")" = "images.zip" ]; then
+                        mkdir -p images
+                        unzip -q -o "$z" -d images
+                    else
+                        unzip -q -o "$z"
+                    fi
+                    rm "$z"
+                done
             done
             cd ..
-            ok "Dataset listo en data/"
+            if [ -f "data/train.csv" ] && [ -f "data/test.csv" ] \
+                && [ -f "data/sample_submission.csv" ] && [ -d "data/images" ]; then
+                ok "Dataset listo en data/"
+            else
+                warn "La descarga terminó, pero faltan archivos esperados en data/."
+            fi
         else
             warn "Falló la descarga del dataset. Verifica: "
             warn "  - Credenciales correctas"
@@ -223,6 +246,7 @@ else:
     import os
     print(f"  CPU threads  : {torch.get_num_threads()}")
     print(f"  Cores disponibles: {os.cpu_count()}")
+    print(f"  MPS disponible: {hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()}")
 PYEOF
 
 # ============================================================================

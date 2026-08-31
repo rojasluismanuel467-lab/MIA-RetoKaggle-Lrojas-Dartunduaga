@@ -11,6 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+from dotenv import load_dotenv
+
+
+# Carga la configuración local sin sobrescribir variables definidas por el
+# sistema, Colab, Kaggle o la terminal.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv()
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 # =============================================================================
@@ -31,7 +40,7 @@ if IS_KAGGLE:
     OUT_DIR = Path("/kaggle/working")
     CKPT_DIR = Path("/kaggle/working/checkpoints")
 else:
-    ROOT = Path(__file__).resolve().parents[2]  # …/MIA-RetoKaggle-Lrojas-Dartunduaga
+    ROOT = PROJECT_ROOT  # …/MIA-RetoKaggle-Lrojas-Dartunduaga
     DATA_DIR = ROOT / "data"
     IMG_DIR = DATA_DIR / "images"
     OUT_DIR = ROOT / "outputs"
@@ -65,6 +74,40 @@ SEED = 42
 # =============================================================================
 # Device + optimización de recursos
 # =============================================================================
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+RUN_HEAVY_EXPERIMENTS = _env_bool("RUN_HEAVY_EXPERIMENTS", False)
+RUN_OPTIMIZATION = _env_bool("RUN_OPTIMIZATION", False)
+
+
+def resolve_device(requested: str | None = None) -> torch.device:
+    """Resuelve auto/cuda/mps/cpu y falla de forma segura a CPU."""
+    choice = (requested or os.getenv("DEVICE", "auto")).strip().lower()
+    if choice not in {"auto", "cuda", "mps", "cpu"}:
+        raise ValueError("DEVICE debe ser uno de: auto, cuda, mps, cpu")
+
+    cuda_ok = torch.cuda.is_available()
+    mps_ok = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    if choice == "cuda" and cuda_ok:
+        return torch.device("cuda")
+    if choice == "mps" and mps_ok:
+        return torch.device("mps")
+    if choice == "auto":
+        if cuda_ok:
+            return torch.device("cuda")
+        if mps_ok:
+            return torch.device("mps")
+        return torch.device("cpu")
+    if choice in {"cuda", "mps"}:
+        print(f"Advertencia: DEVICE={choice} no está disponible; se usará CPU.")
+    return torch.device("cpu")
+
+
 def setup_device_and_threads(num_threads: int | None = None) -> torch.device:
     """Selecciona device y configura threading CPU para máximo throughput.
 
@@ -72,16 +115,17 @@ def setup_device_and_threads(num_threads: int | None = None) -> torch.device:
         num_threads: número de threads torch (default = todos los cores disponibles).
 
     Returns:
-        torch.device — cuda si hay GPU, cpu si no.
+        torch.device — cuda, mps o cpu según DEVICE.
     """
     n = num_threads or os.cpu_count() or 1
     torch.set_num_threads(n)
     if hasattr(torch.backends, "mkldnn"):
         torch.backends.mkldnn.enabled = True  # Intel MKL-DNN aceleración CPU
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return resolve_device()
 
 
 DEVICE = setup_device_and_threads()
+REUSE_CHECKPOINTS = _env_bool("REUSE_CHECKPOINTS", True)
 
 
 # =============================================================================
@@ -119,6 +163,7 @@ class ExpConfig:
     label_smoothing: float = 0.0
     full_finetune: bool = False  # descongelar TODO el backbone (¡catastrophic forgetting risk!)
     lr_backbone_full: float = 2e-5
+    reuse_checkpoint: bool = REUSE_CHECKPOINTS
 
 
 @dataclass
@@ -150,6 +195,11 @@ __all__ = [
     "TRAIN_STD",
     "SEED",
     "DEVICE",
+    "PROJECT_ROOT",
+    "RUN_HEAVY_EXPERIMENTS",
+    "RUN_OPTIMIZATION",
+    "REUSE_CHECKPOINTS",
+    "resolve_device",
     "ExpConfig",
     "ExperimentResult",
     "detect_kaggle",

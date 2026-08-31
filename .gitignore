@@ -3,6 +3,9 @@
 venv/
 env/
 
+# Configuración local (puede contener credenciales o rutas privadas)
+.env
+
 # Referencias de libros (solo uso local, no subir)
 references/
 
