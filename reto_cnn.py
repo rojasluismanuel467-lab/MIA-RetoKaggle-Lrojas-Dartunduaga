@@ -111,6 +111,11 @@ except ImportError:
             os.environ.setdefault(key.strip(), value.strip().strip('"\''))
         return True
 
+try:
+    import mlflow
+except ImportError:
+    mlflow = None
+
 warnings.filterwarnings('ignore')
 sns.set_style('whitegrid')
 
@@ -195,6 +200,10 @@ RUN_HEAVY_EXPERIMENTS = _env_bool('RUN_HEAVY_EXPERIMENTS', False)
 # (los checkpoints p5_*.pt en disco, o cargados desde experiments_log.json).
 RUN_OPTIMIZATION = _env_bool('RUN_OPTIMIZATION', False)
 REUSE_CHECKPOINTS = _env_bool('REUSE_CHECKPOINTS', True)
+MLFLOW_ENABLED = _env_bool('MLFLOW_ENABLED', True)
+MLFLOW_LOG_MODELS = _env_bool('MLFLOW_LOG_MODELS', True)
+MLFLOW_TRACKING_URI = os.getenv('MLFLOW_TRACKING_URI', 'file:./mlruns')
+MLFLOW_EXPERIMENT_NAME = os.getenv('MLFLOW_EXPERIMENT_NAME', 'aaiv-cnn-drowsiness')
 
 # --- Constantes del problema ---
 IMG_W, IMG_H = 1920, 1080
@@ -997,6 +1006,55 @@ def train_one_config(cfg: ExpConfig,
 EXPERIMENTS_LOG: List[Dict] = []
 
 
+def log_mlflow_result(result: Dict) -> None:
+    """Registra un experimento sin permitir que MLflow interrumpa el notebook."""
+    if not MLFLOW_ENABLED or mlflow is None:
+        return
+    try:
+        tracking_uri = MLFLOW_TRACKING_URI
+        if tracking_uri.startswith('file:') and not tracking_uri.startswith('file://'):
+            tracking_uri = (ROOT / tracking_uri.removeprefix('file:')).resolve().as_uri()
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+
+        cfg = result.get('cfg', {})
+        best = result.get('best', {})
+        with mlflow.start_run(run_name=str(result.get('name', 'unnamed'))):
+            mlflow.log_params({str(k): str(v)[:500] for k, v in cfg.items()})
+            mlflow.set_tags({
+                'project': 'aaiv-2026-ii-taller-cnn-miaa-mcd',
+                'device': str(DEVICE),
+                'checkpoint_reused': str(result.get('checkpoint_reused', False)),
+            })
+            metrics = {
+                'best_val_loss': best.get('val_loss'),
+                'best_val_acc': best.get('val_acc'),
+                'best_val_dice': best.get('val_dice'),
+                'best_epoch': best.get('epoch'),
+            }
+            metrics = {k: float(v) for k, v in metrics.items()
+                       if v is not None and math.isfinite(float(v))}
+            mlflow.log_metrics(metrics)
+            for step, row in enumerate(result.get('history', [])):
+                row_metrics = {}
+                for key, value in row.items():
+                    if key in {'epoch', 'phase'}:
+                        continue
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(number):
+                        row_metrics[key] = number
+                if row_metrics:
+                    mlflow.log_metrics(row_metrics, step=step)
+            checkpoint = result.get('ckpt')
+            if MLFLOW_LOG_MODELS and checkpoint and Path(checkpoint).exists():
+                mlflow.log_artifact(checkpoint, artifact_path='checkpoints')
+    except Exception as exc:
+        warnings.warn(f'MLflow no pudo registrar {result.get("name", "unnamed")}: {exc}')
+
+
 def register(result: Dict) -> None:
     EXPERIMENTS_LOG.append(result)
     # Persistir en disco MERGEANDO con lo que ya hay (no sobreescribir experimentos previos).
@@ -1014,6 +1072,7 @@ def register(result: Dict) -> None:
         existing[r['name']] = {'name': r['name'], 'cfg': r['cfg'], 'best': r['best']}
     with open(json_path, 'w') as f:
         json.dump(list(existing.values()), f, indent=2)
+    log_mlflow_result(result)
 
 
 def summary_df() -> pd.DataFrame:

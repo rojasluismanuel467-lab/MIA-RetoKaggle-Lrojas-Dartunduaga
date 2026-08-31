@@ -63,6 +63,18 @@ La configuración de ejecución se lee desde `.env` (`RUN_HEAVY_EXPERIMENTS`,
 existe, luego MPS en Apple Silicon y finalmente CPU. Los checkpoints se guardan
 en `checkpoints/` y se reutilizan cuando `REUSE_CHECKPOINTS=true`.
 
+MLflow queda habilitado por defecto para registrar parámetros, métricas,
+historial y checkpoints en `mlflow.db` mediante un tracking store SQLite local. Para ver
+la interfaz:
+
+```bash
+source .venv/bin/activate
+mlflow ui --backend-store-uri sqlite:///./mlflow.db --port 5000
+```
+
+Abre `http://127.0.0.1:5000`. El tracking es local y no requiere cuenta. Se
+puede desactivar con `MLFLOW_ENABLED=false`.
+
 ### Descargar dataset
 
 ```bash
@@ -125,6 +137,14 @@ imágenes JPG en `data/images/`. Copia también `.env.example` como `.env` (los
 valores `false`, `false`, `DEVICE=auto` son los recomendados para la primera
 corrida) y abre `reto_cnn.ipynb`. Si no clonas el repo, debes subir el notebook,
 `src/`, `pyproject.toml`, `.env` y la carpeta `data/`.
+
+En Colab puedes visualizar MLflow dentro del notebook con:
+
+```python
+!mlflow ui --backend-store-uri sqlite:///./mlflow.db --host 0.0.0.0 --port 5000 &
+from google.colab import output
+output.serve_kernel_port_as_window(5000)
+```
 
 ---
 

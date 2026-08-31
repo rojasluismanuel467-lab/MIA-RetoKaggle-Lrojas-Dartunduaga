@@ -83,6 +83,10 @@ def _env_bool(name: str, default: bool) -> bool:
 
 RUN_HEAVY_EXPERIMENTS = _env_bool("RUN_HEAVY_EXPERIMENTS", False)
 RUN_OPTIMIZATION = _env_bool("RUN_OPTIMIZATION", False)
+MLFLOW_ENABLED = _env_bool("MLFLOW_ENABLED", True)
+MLFLOW_LOG_MODELS = _env_bool("MLFLOW_LOG_MODELS", True)
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "file:./mlruns")
+MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "aaiv-cnn-drowsiness")
 
 
 def resolve_device(requested: str | None = None) -> torch.device:
@@ -198,6 +202,10 @@ __all__ = [
     "PROJECT_ROOT",
     "RUN_HEAVY_EXPERIMENTS",
     "RUN_OPTIMIZATION",
+    "MLFLOW_ENABLED",
+    "MLFLOW_LOG_MODELS",
+    "MLFLOW_TRACKING_URI",
+    "MLFLOW_EXPERIMENT_NAME",
     "REUSE_CHECKPOINTS",
     "resolve_device",
     "ExpConfig",

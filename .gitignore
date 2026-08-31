@@ -53,3 +53,7 @@ models/checkpoints/
 runs/
 lightning_logs/
 wandb/
+mlruns/
+mlflow.db
+mlflow.db-*
+mlartifacts/

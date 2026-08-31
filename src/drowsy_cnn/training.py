@@ -21,6 +21,7 @@ from .checkpoints import load_checkpoint, save_checkpoint
 from .config import CKPT_DIR, CLASSES, DEVICE, IMG_DIR, N_CLASSES, ExpConfig
 from .dataset import DrowsyDataset
 from .losses import EarlyStopping, MultitaskLoss, bbox_dice
+from .mlflow_utils import log_experiment_result
 from .models import CustomCNN, build_pretrained, unfreeze_last_stage
 
 
@@ -168,13 +169,16 @@ def train_one_config(
             history = payload.get("history", [])
             if verbose:
                 print(f"  ↳ checkpoint reutilizado: {ckpt_path}")
-            return dict(
+            result = dict(
                 name=cfg.name,
                 cfg=asdict(cfg),
                 history=history,
                 best=best,
                 ckpt=str(ckpt_path),
+                checkpoint_reused=True,
             )
+            log_experiment_result(result)
+            return result
         except (RuntimeError, KeyError, TypeError, ValueError) as exc:
             if verbose:
                 print(f"  ↳ checkpoint incompatible; se reentrena ({exc})")
@@ -291,7 +295,9 @@ def train_one_config(
             EarlyStopping(patience=cfg.early_stopping_patience),
         )
 
-    return dict(name=cfg.name, cfg=asdict(cfg), history=history, best=best, ckpt=str(ckpt_path))
+    result = dict(name=cfg.name, cfg=asdict(cfg), history=history, best=best, ckpt=str(ckpt_path))
+    log_experiment_result(result)
+    return result
 
 
 __all__ = [

@@ -55,6 +55,11 @@ seleccionar una GPU NVIDIA para obtener CUDA.
 archivo de `checkpoints/` en vez de volver a entrenarse. Para reentrenarlo,
 cambiar temporalmente a `false` o usar un nombre nuevo.
 
+MLflow queda habilitado con `MLFLOW_ENABLED=true`. El tracking store local está
+en `mlflow.db` (SQLite), ignorado por Git. Cada entrenamiento nuevo registra parámetros,
+métricas finales, métricas por época y el checkpoint como artefacto. Abrir la
+interfaz con `mlflow ui --backend-store-uri sqlite:///./mlflow.db --port 5000`.
+
 ## Qué significa cada bandera
 
 - `RUN_HEAVY_EXPERIMENTS`: activa los barridos exigidos por la rúbrica:
