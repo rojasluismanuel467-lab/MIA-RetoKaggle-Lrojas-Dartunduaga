@@ -15,6 +15,7 @@ Competencia Kaggle: [aaiv-2026-ii-taller-cnn-miaa-mcd](https://www.kaggle.com/co
 ```
 MIA-RetoKaggle-Lrojas-Dartunduaga/
 ├── pyproject.toml               # setuptools + ruff + pytest + mypy config
+├── .env.example                 # configuración local/Colab de ejecución
 ├── src/drowsy_cnn/              # PAQUETE PYTHON — código modularizado y testeado
 │   ├── config.py                # ExpConfig, constantes, detección Kaggle vs local
 │   ├── dataset.py               # DrowsyDataset, CropDataset, conversiones bbox
@@ -57,12 +58,20 @@ pip install -e ".[dev]"                    # paquete + tests + linter
 pytest tests/ -v                            # 19 smoke tests
 ```
 
+La configuración de ejecución se lee desde `.env` (`RUN_HEAVY_EXPERIMENTS`,
+`RUN_OPTIMIZATION`, `DEVICE` y `REUSE_CHECKPOINTS`). `DEVICE=auto` usa CUDA si
+existe, luego MPS en Apple Silicon y finalmente CPU. Los checkpoints se guardan
+en `checkpoints/` y se reutilizan cuando `REUSE_CHECKPOINTS=true`.
+
 ### Descargar dataset
 
 ```bash
 export KAGGLE_API_TOKEN="tu_token_aqui"     # o kaggle.json en ~/.kaggle/
 bash tools/setup_data.sh
 ```
+
+Se esperan `data/train.csv`, `data/test.csv`, `data/sample_submission.csv` y
+`data/images/`. El dataset no se versiona porque contiene archivos pesados.
 
 ### Correr el notebook
 
@@ -72,12 +81,50 @@ jupyter lab reto_cnn.ipynb
 
 Kernel: **Python (Reto Kaggle CNN)** (registrado con `python -m ipykernel install --user --name reto-kaggle-cnn`).
 
+### Ejecutar como Python
+
+`reto_cnn.py` no es otra solución distinta: es la fuente en formato Jupytext de
+`reto_cnn.ipynb`; ambos deben mantenerse sincronizados. Para ejecutar el mismo
+pipeline sin abrir Jupyter:
+
+```bash
+source .venv/bin/activate
+python reto_cnn.py
+```
+
+La alternativa modular está en `src/drowsy_cnn/` y sus scripts `tools/`. Por
+ejemplo, `python tools/example_usage.py` ejecuta un experimento individual con
+un backbone preentrenado; no reemplaza al notebook entregable.
+
 ### Kaggle
 
 El notebook detecta automáticamente si corre en Kaggle (`config.IS_KAGGLE = True`) y usa `/kaggle/input/…` como `DATA_DIR`. Para usarlo allí:
 1. Subir el notebook a Kaggle.
 2. Attach el dataset de la competencia como input.
 3. Correr — el paquete `drowsy_cnn` se instala inline en la primera celda vía `pip install /kaggle/input/...` o el código se define en las celdas.
+
+Para una prueba rápida deja `RUN_HEAVY_EXPERIMENTS=false` y
+`RUN_OPTIMIZATION=false`. Para reproducir los barridos de la rúbrica activa los
+dos valores, sabiendo que cada configuración es un entrenamiento adicional.
+
+### Google Colab
+
+En el cuadro de Colab de la imagen adjunta, selecciona **T4 GPU** (o **L4** si
+está disponible). Este proyecto usa PyTorch/CUDA; no selecciones TPU. La forma
+más sencilla de preparar el entorno es clonar el repositorio y subir únicamente
+los datos, conservando el mismo layout:
+
+```python
+!git clone https://github.com/rojasluismanuel467-lab/MIA-RetoKaggle-Lrojas-Dartunduaga.git
+%cd MIA-RetoKaggle-Lrojas-Dartunduaga
+!pip install -q -e ".[dev,extra]"
+```
+
+Luego coloca `train.csv`, `test.csv`, `sample_submission.csv` en `data/` y las
+imágenes JPG en `data/images/`. Copia también `.env.example` como `.env` (los
+valores `false`, `false`, `DEVICE=auto` son los recomendados para la primera
+corrida) y abre `reto_cnn.ipynb`. Si no clonas el repo, debes subir el notebook,
+`src/`, `pyproject.toml`, `.env` y la carpeta `data/`.
 
 ---
 

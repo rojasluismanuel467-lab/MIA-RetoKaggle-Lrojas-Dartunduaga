@@ -95,8 +95,30 @@ from sklearn.metrics import (
     accuracy_score, classification_report, confusion_matrix
 )
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(dotenv_path=None, *args, **kwargs):
+        """Fallback mínimo para Colab si python-dotenv aún no está instalado."""
+        path = Path(dotenv_path or '.env')
+        if not path.exists():
+            return False
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"\''))
+        return True
+
 warnings.filterwarnings('ignore')
 sns.set_style('whitegrid')
+
+# Carga .env desde la raíz de ejecución (local/Colab) y deja que las variables
+# explícitas del entorno tengan prioridad.
+ROOT = Path('.').resolve()
+load_dotenv(ROOT / '.env')
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 
 # --- Semilla fija para reproducibilidad ---
 SEED = 42
@@ -106,7 +128,36 @@ torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def resolve_device(requested: Optional[str] = None) -> torch.device:
+    """Selecciona auto/cuda/mps/cpu y cae a CPU si el acelerador no existe."""
+    choice = (requested or os.getenv('DEVICE', 'auto')).strip().lower()
+    if choice not in {'auto', 'cuda', 'mps', 'cpu'}:
+        raise ValueError('DEVICE debe ser uno de: auto, cuda, mps, cpu')
+    cuda_ok = torch.cuda.is_available()
+    mps_ok = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+    if choice == 'cuda' and cuda_ok:
+        return torch.device('cuda')
+    if choice == 'mps' and mps_ok:
+        return torch.device('mps')
+    if choice == 'auto':
+        if cuda_ok:
+            return torch.device('cuda')
+        if mps_ok:
+            return torch.device('mps')
+        return torch.device('cpu')
+    if choice in {'cuda', 'mps'}:
+        print(f'⚠ DEVICE={choice} no está disponible; se usará CPU.')
+    return torch.device('cpu')
+
+
+DEVICE = resolve_device()
 
 # --- Detección Kaggle vs local + optimización CPU ---
 IS_KAGGLE = Path('/kaggle/input').exists() or 'KAGGLE_KERNEL_RUN_TYPE' in os.environ
@@ -118,7 +169,6 @@ if IS_KAGGLE:
     CKPT_DIR = OUT_DIR / 'checkpoints';       CKPT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"→ Detectado entorno Kaggle. DATA_DIR = {DATA_DIR}")
 else:
-    ROOT = Path('.').resolve()
     DATA_DIR = ROOT / 'data'
     IMG_DIR  = DATA_DIR / 'images'
     OUT_DIR  = ROOT / 'outputs';    OUT_DIR.mkdir(exist_ok=True)
@@ -138,12 +188,13 @@ print(f"→ CPU threads = {_n_threads}, MKL-DNN habilitado")
 #       §13 (3 backbones), §14 (k-fold sobre top-3), §15 (inference).
 #       Total estimado en CPU: ~2-3 horas.
 # El compañero pone True cuando quiera reproducir todo end-to-end.
-RUN_HEAVY_EXPERIMENTS = True
+RUN_HEAVY_EXPERIMENTS = _env_bool('RUN_HEAVY_EXPERIMENTS', False)
 
 # --- Flag secundario: §16 optimizaciones avanzadas (full-finetune + ensemble + pseudo-label) ---
 # Independiente de RUN_HEAVY_EXPERIMENTS. Requiere que §13 haya corrido antes
 # (los checkpoints p5_*.pt en disco, o cargados desde experiments_log.json).
-RUN_OPTIMIZATION = True
+RUN_OPTIMIZATION = _env_bool('RUN_OPTIMIZATION', False)
+REUSE_CHECKPOINTS = _env_bool('REUSE_CHECKPOINTS', True)
 
 # --- Constantes del problema ---
 IMG_W, IMG_H = 1920, 1080
@@ -555,6 +606,26 @@ print(f"IoU(shifted)    = {iou2:.4f}  |  Dice(shifted) = {dice2:.4f}")
 # - Basado en el patrón `ch14_part2.py:289-306` de Raschka.
 
 # %%
+def _checkpoint_state(payload):
+    """Acepta tanto checkpoints nuevos como state_dict históricos."""
+    return payload.get('model_state_dict', payload) if isinstance(payload, dict) else payload
+
+
+def load_model_checkpoint(model, path):
+    payload = torch.load(path, map_location=DEVICE)
+    model.load_state_dict(_checkpoint_state(payload))
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_model_checkpoint(model, path, cfg, best, history):
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'cfg': asdict(cfg),
+        'best': best,
+        'history': history,
+    }, path)
+
+
 class CustomCNN(nn.Module):
     """
     Multitask CNN from scratch:
@@ -734,6 +805,7 @@ class ExpConfig:
     label_smoothing: float = 0.0           # 0.05-0.1 típico; regulariza confidence
     full_finetune: bool = False            # True: descongela TODO el backbone desde el inicio (skip fase A)
     lr_backbone_full: float = 2e-5         # LR muy bajo para full-finetune (backbone LR = head LR / 25)
+    reuse_checkpoint: bool = REUSE_CHECKPOINTS
 
 
 def make_optimizer(model: nn.Module, cfg: ExpConfig, param_groups=None):
@@ -824,6 +896,24 @@ def train_one_config(cfg: ExpConfig,
         model = build_pretrained(cfg.model_kind, dropout_head=cfg.dropout_head, freeze=True)
     model = model.to(DEVICE)
 
+    ckpt_path = CKPT_DIR / f"{cfg.name}.pt"
+    if cfg.reuse_checkpoint and ckpt_path.exists():
+        try:
+            payload = load_model_checkpoint(model, ckpt_path)
+            cached_best = payload.get(
+                'best', dict(val_loss=math.nan, val_acc=math.nan, val_dice=math.nan, epoch=-1)
+            )
+            cached_history = payload.get('history', [])
+            if verbose:
+                print(f"  ↳ checkpoint reutilizado: {ckpt_path}")
+            return dict(
+                name=cfg.name, cfg=asdict(cfg), history=cached_history,
+                best=cached_best, ckpt=str(ckpt_path)
+            )
+        except (RuntimeError, KeyError, TypeError, ValueError) as exc:
+            if verbose:
+                print(f"  ↳ checkpoint incompatible; se reentrena ({exc})")
+
     # Loss
     cw = class_weights.to(DEVICE) if cfg.use_class_weights else None
     loss_fn = MultitaskLoss(
@@ -834,8 +924,6 @@ def train_one_config(cfg: ExpConfig,
 
     history = []
     best = dict(val_loss=math.inf, val_acc=0.0, val_dice=0.0, epoch=-1)
-    ckpt_path = CKPT_DIR / f"{cfg.name}.pt"
-
     def _run_phase(n_epochs: int, phase_label: str, opt, sched, es):
         nonlocal best
         for ep in range(n_epochs):
@@ -854,7 +942,7 @@ def train_one_config(cfg: ExpConfig,
             if val_metrics['loss'] < best['val_loss']:
                 best = dict(val_loss=val_metrics['loss'], val_acc=val_metrics['acc'],
                             val_dice=val_metrics['dice'], epoch=len(history)-1)
-                torch.save(model.state_dict(), ckpt_path)
+                save_model_checkpoint(model, ckpt_path, cfg, best, history)
             if es.step(val_metrics['loss']):
                 if verbose:
                     print(f"  ↳ early stopping @ep{ep+1} (patience={cfg.early_stopping_patience})")
@@ -1329,7 +1417,7 @@ if len(EXPERIMENTS_LOG) >= 1:
     else:
         model_best = build_pretrained(cfg_best.model_kind, freeze=False)
         use_in = True
-    model_best.load_state_dict(torch.load(best_exp['ckpt'], map_location=DEVICE))
+    load_model_checkpoint(model_best, best_exp['ckpt'])
     model_best = model_best.to(DEVICE)
     visualize_predictions(model_best, df_val, n=8, input_size=cfg_best.input_size,
                           use_imagenet_stats=use_in)
@@ -1578,7 +1666,7 @@ if len(EXPERIMENTS_LOG) >= 1:
     else:
         m = build_pretrained(cfg_win.model_kind, freeze=False)
         use_in = True
-    m.load_state_dict(torch.load(winner['ckpt'], map_location=DEVICE))
+    load_model_checkpoint(m, winner['ckpt'])
     m = m.to(DEVICE)
 
     sub = predict_with_tta(m, df_test, cfg_win.input_size, use_in, batch_size=32)
@@ -1763,7 +1851,7 @@ def load_model_from_exp(exp: Dict):
     else:
         m = build_pretrained(cfg.model_kind, freeze=False)
         use_in = True
-    m.load_state_dict(torch.load(exp['ckpt'], map_location=DEVICE))
+    load_model_checkpoint(m, exp['ckpt'])
     m = m.to(DEVICE)
     return m, use_in
 
@@ -2141,7 +2229,7 @@ if RUN_OPTIMIZATION:
     snap_models = []
     for path in snap_paths_clean:
         m = build_pretrained('efficientnet_b0', freeze=False, dropout_head=0.3)
-        m.load_state_dict(torch.load(path, map_location=DEVICE))
+        load_model_checkpoint(m, path)
         snap_models.append(m.to(DEVICE))
 
     snap_val = ensemble_predict(snap_models, df_val, 224, True, with_bbox_true=True)
@@ -2364,7 +2452,7 @@ if RUN_OPTIMIZATION:
         p = CKPT_DIR / f'{name}.pt'
         if not p.exists(): continue
         m = build_pretrained(kind, freeze=False)
-        m.load_state_dict(torch.load(p, map_location=DEVICE))
+        load_model_checkpoint(m, p)
         stage1_models.append(m.to(DEVICE))
     print(f"Stage 1: {len(stage1_models)} modelos para bbox prediction")
 
@@ -2426,7 +2514,7 @@ if RUN_OPTIMIZATION:
     if p18_ckpt.exists():
         print(f"Cargando checkpoint existente: {p18_ckpt.name}")
         crop_model = CropClassifier(dropout=0.3).to(DEVICE)
-        crop_model.load_state_dict(torch.load(p18_ckpt, map_location=DEVICE))
+        load_model_checkpoint(crop_model, p18_ckpt)
         best_val_acc = float('nan')
     else:
         print("Entrenando CropClassifier (train usa GT bbox, val usa bbox predicho)...")
@@ -2642,7 +2730,7 @@ if 'crop_model' in dir() and 'df_val_predicted' in dir():
 elif _p18_ckpt.exists():
     print(f"Cargando crop classifier desde {_p18_ckpt.name}...")
     crop_model = CropClassifier(dropout=0.3).to(DEVICE)
-    crop_model.load_state_dict(torch.load(_p18_ckpt, map_location=DEVICE))
+    load_model_checkpoint(crop_model, _p18_ckpt)
     # Regenerar bboxes val con stage1 (los mismos p5_* + snapshots)
     stage1_names = [('p5_resnet18', 'resnet18'),
                     ('p5_mobilenet_v3_small', 'mobilenet_v3_small'),
@@ -2655,7 +2743,7 @@ elif _p18_ckpt.exists():
         p = CKPT_DIR / f'{name}.pt'
         if not p.exists(): continue
         m = build_pretrained(kind, freeze=False)
-        m.load_state_dict(torch.load(p, map_location=DEVICE))
+        load_model_checkpoint(m, p)
         stage1_models.append(m.to(DEVICE))
     if stage1_models:
         print(f"Predicting bboxes val con {len(stage1_models)} modelos stage1...")
