@@ -24,13 +24,14 @@
       "num_workers": 0,
       "label_smoothing": 0.0,
       "full_finetune": false,
-      "lr_backbone_full": 2e-05
+      "lr_backbone_full": 2e-05,
+      "reuse_checkpoint": true
     },
     "best": {
-      "val_loss": 9.156820478893462,
-      "val_acc": 0.5714285714285714,
-      "val_dice": 0.2937452793121338,
-      "epoch": 0
+      "val_loss": 8.082777000608898,
+      "val_acc": 0.4523809523809524,
+      "val_dice": 0.4211984021323068,
+      "epoch": 22
     }
   },
   {
