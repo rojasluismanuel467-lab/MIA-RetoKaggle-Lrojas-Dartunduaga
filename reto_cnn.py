@@ -63,7 +63,7 @@
 # **Fundamento:** reproducibilidad (semilla fija en todo el pipeline) + config centralizada (directriz 4).
 
 # %%
-import os, sys, random, json, time, math, warnings
+import os, sys, random, json, time, math, warnings, traceback
 from pathlib import Path
 from typing import Tuple, List, Dict, Callable, Optional
 from dataclasses import dataclass, field, asdict
@@ -188,12 +188,9 @@ if hasattr(torch.backends, 'mkldnn'):
 print(f"→ CPU threads = {_n_threads}, MKL-DNN habilitado")
 
 # --- Flag maestro: correr o no los experimentos pesados de §11-15 ---
-# False (default): al hacer "Run All" solo corre §10 baseline (~5 min).
-# True: corre todos los experimentos de §11 (barridos hyperparam), §12 (aug ablation),
-#       §13 (3 backbones), §14 (k-fold sobre top-3), §15 (inference).
-#       Total estimado en CPU: ~2-3 horas.
-# El compañero pone True cuando quiera reproducir todo end-to-end.
-RUN_HEAVY_EXPERIMENTS = _env_bool('RUN_HEAVY_EXPERIMENTS', False)
+# True (default): un Restart Kernel + Run All ejecuta la evidencia obligatoria
+# de §10--§15. Puede tardar varias horas según el hardware.
+RUN_HEAVY_EXPERIMENTS = _env_bool('RUN_HEAVY_EXPERIMENTS', True)
 
 # --- Flag secundario: §16 optimizaciones avanzadas (full-finetune + ensemble + pseudo-label) ---
 # Independiente de RUN_HEAVY_EXPERIMENTS. Requiere que §13 haya corrido antes
@@ -211,6 +208,38 @@ CLASSES = ['awake', 'drowsy']  # orden fijo: awake=0, drowsy=1
 N_CLASSES = len(CLASSES)
 CLS2IDX = {c: i for i, c in enumerate(CLASSES)}
 IDX2CLS = {i: c for c, i in CLS2IDX.items()}
+EXPECTED_SUBMISSION_COLUMNS = ['filename', 'class', 'xmin', 'ymin', 'xmax', 'ymax']
+
+
+def validate_submission(submission: pd.DataFrame, df_test_reference: pd.DataFrame) -> None:
+    """Valida el contrato Kaggle antes de escribir cualquier CSV de submission."""
+    assert list(submission.columns) == EXPECTED_SUBMISSION_COLUMNS
+    assert len(submission) == len(df_test_reference)
+    assert submission['filename'].tolist() == df_test_reference['filename'].tolist()
+    assert submission['class'].isin(CLASSES).all()
+    assert submission[['xmin', 'ymin', 'xmax', 'ymax']].notna().all().all()
+    assert submission['xmin'].between(0, IMG_W).all()
+    assert submission['xmax'].between(0, IMG_W).all()
+    assert submission['ymin'].between(0, IMG_H).all()
+    assert submission['ymax'].between(0, IMG_H).all()
+    assert (submission['xmin'] < submission['xmax']).all()
+    assert (submission['ymin'] < submission['ymax']).all()
+
+
+def save_submission(submission: pd.DataFrame, path: Path, df_test_reference: pd.DataFrame) -> None:
+    """Normaliza cajas degeneradas, valida y escribe una submission sin índice."""
+    submission = submission.copy()
+    for low, high, limit in [('xmin', 'xmax', IMG_W), ('ymin', 'ymax', IMG_H)]:
+        lo = np.minimum(submission[low].to_numpy(), submission[high].to_numpy())
+        hi = np.maximum(submission[low].to_numpy(), submission[high].to_numpy())
+        lo = np.clip(lo, 0, limit - 1)
+        hi = np.clip(hi, 1, limit)
+        lo = np.minimum(lo, hi - 1)
+        hi = np.maximum(hi, lo + 1)
+        submission[low] = lo.astype(int)
+        submission[high] = hi.astype(int)
+    validate_submission(submission, df_test_reference)
+    submission.to_csv(path, index=False)
 
 # --- Stats de normalización ---
 # ImageNet stats — usar CON backbones preentrenados (mantiene warm-start)
@@ -996,6 +1025,33 @@ def train_one_config(cfg: ExpConfig,
         name=cfg.name, cfg=asdict(cfg), history=history, best=best, ckpt=str(ckpt_path),
     )
 
+
+def run_and_register(cfg: ExpConfig,
+                     df_train_split: pd.DataFrame = None,
+                     df_val_split: pd.DataFrame = None,
+                     verbose: bool = False) -> Optional[Dict]:
+    """Aísla fallos por configuración y persiste cada experimento exitoso de inmediato."""
+    print(f"\n>>> INICIO: {cfg.name}")
+    try:
+        result = train_one_config(
+            cfg,
+            df_tr if df_train_split is None else df_train_split,
+            df_val if df_val_split is None else df_val_split,
+            verbose=verbose,
+        )
+        register(result)
+        print(f">>> FIN: {cfg.name} | val_acc={result['best']['val_acc']:.4f} | "
+              f"val_dice={result['best']['val_dice']:.4f}")
+        return result
+    except Exception as exc:
+        print(f">>> ERROR en {cfg.name}: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        warnings.warn(f"El experimento {cfg.name} falló; los resultados anteriores fueron preservados.")
+        return None
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 # %% [markdown]
 # ---
 # ## §9. Tracker de experimentos
@@ -1056,6 +1112,8 @@ def log_mlflow_result(result: Dict) -> None:
 
 
 def register(result: Dict) -> None:
+    # Un nombre identifica una configuración: al reintentar, conservar solo su resultado reciente.
+    EXPERIMENTS_LOG[:] = [r for r in EXPERIMENTS_LOG if r['name'] != result['name']]
     EXPERIMENTS_LOG.append(result)
     # Persistir en disco MERGEANDO con lo que ya hay (no sobreescribir experimentos previos).
     json_path = OUT_DIR / 'experiments_log.json'
@@ -1072,6 +1130,8 @@ def register(result: Dict) -> None:
         existing[r['name']] = {'name': r['name'], 'cfg': r['cfg'], 'best': r['best']}
     with open(json_path, 'w') as f:
         json.dump(list(existing.values()), f, indent=2)
+    # CSV plano para comparar y ordenar sin tener que reconstruir el notebook.
+    summary_df().to_csv(OUT_DIR / 'experiments_summary.csv', index=False)
     log_mlflow_result(result)
 
 
@@ -1083,6 +1143,12 @@ def summary_df() -> pd.DataFrame:
             'model_kind' : r['cfg']['model_kind'],
             'aug_level'  : r['cfg']['aug_level'],
             'bbox_w'     : r['cfg']['bbox_loss_weight'],
+            'optimizer'  : r['cfg']['optimizer'],
+            'lr_head'    : r['cfg']['lr_head'],
+            'dropout'    : r['cfg']['dropout_head'],
+            'scheduler'  : r['cfg']['scheduler'],
+            'weight_decay': r['cfg']['weight_decay'],
+            'batch_size' : r['cfg']['batch_size'],
             'best_epoch' : r['best']['epoch'],
             'val_loss'   : round(r['best']['val_loss'], 4),
             'val_acc'    : round(r['best']['val_acc'],  4),
@@ -1165,9 +1231,8 @@ for k, v in asdict(cfg_p1).items():
 
 # %%
 t0 = time.time()
-result_p1 = train_one_config(cfg_p1, df_tr, df_val, verbose=True)
+result_p1 = run_and_register(cfg_p1, verbose=True)
 print(f"\nDuración total: {(time.time()-t0)/60:.1f} min")
-register(result_p1)
 
 # %% [markdown]
 # ### Curvas de aprendizaje
@@ -1230,8 +1295,7 @@ def run_sweep(variants: List[Dict], base_cfg_kwargs: Dict) -> None:
     """Corre una lista de variantes de hyperparam (dict cada una) sobre un base_cfg dado."""
     for v in variants:
         cfg = ExpConfig(**{**base_cfg_kwargs, **v})
-        print(f"\n>>> {cfg.name}")
-        register(train_one_config(cfg, df_tr, df_val, verbose=False))
+        run_and_register(cfg, verbose=False)
 
 
 BASE_P11 = dict(model_kind='custom', total_epochs=20, aug_level='basic',
@@ -1267,10 +1331,8 @@ else:
 # %% [markdown]
 # ### Análisis §11 — impacto del mejor hiperparámetro
 #
-# **TODO compañero (después de correr):** identificar en `summary_df()` la mejor variante por métrica
-# combinada (val_acc + val_dice), y anotar el hallazgo en una celda markdown. Ejemplo:
-# > "AdamW supera a Adam en +2.1% Dice y +0.8% Acc, y a SGD por +5%. El barrido de `bbox_loss_weight`
-# > muestra que λ=5 es el sweet spot: λ=1 subordina bbox a cls, λ=10 destruye la accuracy."
+# **Resultado:** completar después de ejecutar los experimentos. Usar `summary_df()` y conservar
+# por separado `val_acc` y `val_dice` al describir el impacto de optimizer/LR, peso de bbox y dropout.
 
 # %% [markdown]
 # ---
@@ -1320,10 +1382,8 @@ else:
 
 # %% [markdown]
 # ### Análisis §12
-# **TODO compañero:** anotar el hallazgo. Se espera:
-# - `none`: mayor gap train↔val (overfit temprano).
-# - `basic`: gap reducido, dice similar o mejor.
-# - `strong`: gap mínimo, dice puede ser menor si sobre-aumenta con 336 imgs.
+# **Resultado:** completar después de ejecutar. Comparar `none`, `basic` y `strong` con
+# `val_acc`, `val_dice` y las curvas train/validation; no asumir una dirección de mejora.
 
 # %% [markdown]
 # ---
@@ -1348,8 +1408,7 @@ BASE_P13 = dict(aug_level='basic', batch_size=32,
 if RUN_HEAVY_EXPERIMENTS:
     for backbone in ['resnet18', 'mobilenet_v3_small', 'efficientnet_b0']:
         cfg = ExpConfig(**{**BASE_P13, 'name': f'p5_{backbone}', 'model_kind': backbone})
-        print(f"\n>>> {cfg.name}")
-        register(train_one_config(cfg, df_tr, df_val, verbose=False))
+        run_and_register(cfg, verbose=False)
 
     print("\n=== Resumen §13 (transfer learning) ===")
     print(summary_df().to_string(index=False))
@@ -1358,10 +1417,8 @@ else:
 
 # %% [markdown]
 # ### Análisis §13
-# **TODO compañero:** discutir accuracy/params trade-off. Se espera:
-# - **EfficientNet-B0**: probablemente el mejor Dice (design óptimo depth/width).
-# - **ResNet18**: baseline sólido, más pesado.
-# - **MobileNetV3-small**: menor accuracy pero 5-10× más rápido en inferencia (útil para deploy en cabina).
+# **Resultado:** completar después de ejecutar. Comparar los tres backbones con sus métricas
+# observadas y coste computacional, sin asumir cuál será el ganador.
 
 # %% [markdown]
 # ---
@@ -1408,8 +1465,12 @@ def kfold_evaluate(exp_names_top3: List[str], n_folds: int = 5) -> pd.DataFrame:
         dices, accs = [], []
         for i, (df_k_tr, df_k_val) in enumerate(folds):
             cfg_k = ExpConfig(**{**base, 'name': f'{exp_name}_fold{i+1}'})
-            r = train_one_config(cfg_k, df_k_tr, df_k_val, verbose=False)
-            dices.append(r['best']['val_dice']); accs.append(r['best']['val_acc'])
+            r = run_and_register(cfg_k, df_k_tr, df_k_val, verbose=False)
+            if r is not None:
+                dices.append(r['best']['val_dice']); accs.append(r['best']['val_acc'])
+        if not dices:
+            print(f"  ⚠ {exp_name}: todos los folds fallaron; se omite de la tabla k-fold.")
+            continue
         rows.append(dict(exp=exp_name,
                          dice_mean=np.mean(dices), dice_std=np.std(dices),
                          acc_mean =np.mean(accs),  acc_std =np.std(accs)))
@@ -1730,9 +1791,9 @@ if len(EXPERIMENTS_LOG) >= 1:
 
     sub = predict_with_tta(m, df_test, cfg_win.input_size, use_in, batch_size=32)
     sub_path = OUT_DIR / f"submission_{winner['name']}.csv"
-    sub.to_csv(sub_path, index=False)
+    save_submission(sub, sub_path, df_test)
     print(f"\n✓ submission escrita: {sub_path}")
-    print(f"  Filas: {len(sub)} (esperado 106)")
+    print(f"  Filas: {len(sub)} (esperado {len(df_test)})")
     print(f"  Distribución de clases: {sub['class'].value_counts().to_dict()}")
     print("\n--- head ---")
     print(sub.head())
@@ -1743,14 +1804,14 @@ else:
 # ---
 # ## §16. Optimización avanzada — empujar val_acc > 0.90
 #
-# **Objetivo:** subir la accuracy del ganador (~0.82) combinando 4 técnicas de Kaggle-winner style.
+# **Objetivo:** evaluar técnicas adicionales de forma separada de la evidencia obligatoria.
 #
-# | # | Técnica | Ganancia esperada | Fuente |
-# |---|---|---|---|
-# | 1 | Label smoothing 0.1 en CE | +0.5-1% | [Müller et al. 2019](https://arxiv.org/abs/1906.02629) |
-# | 2 | Full fine-tune con LR diferencial (backbone LR = head LR / 25) | +2-4% | Chollet cap 8, práctica DETR |
-# | 3 | Ensemble top-3 backbones (promedio logits + bbox con TTA) | +2-3% | Kaggle winners pattern universal |
-# | 4 | Pseudo-labeling en test (filtrar confidence >0.95, añadir a train, retrain) | +2-5% | [Lee 2013 pseudo-label paper](https://www.researchgate.net/publication/280581078_Pseudo-Label_The_Simple_and_Efficient_Semi-Supervised_Learning_Method_for_Deep_Neural_Networks) |
+# | Técnica | Fuente |
+# |---|---|
+# | Label smoothing | [Müller et al. 2019](https://arxiv.org/abs/1906.02629) |
+# | Fine-tuning con LR diferencial | Chollet cap 8 |
+# | Ensemble con TTA | Patrón común en competiciones |
+# | Pseudo-labeling | [Lee 2013](https://www.researchgate.net/publication/280581078_Pseudo-Label_The_Simple_and_Efficient_Semi-Supervised_Learning_Method_for_Deep_Neural_Networks) |
 #
 # Se ejecuta solo si `RUN_OPTIMIZATION=True` en §1.
 
@@ -1811,24 +1872,10 @@ for ckpt_file in sorted(CKPT_DIR.glob('*.pt')):
 print(f"Total experimentos disponibles (con ckpt): {len(EXPERIMENTS_LOG)}")
 
 # %% [markdown]
-# ### §16.A — Hallazgo: full fine-tune degrada con dataset chico
+# ### §16.A — Full fine-tuning (opcional)
 #
-# **Experimento realizado y descartado:** descongelar TODO el backbone (no solo el último stage) con LR
-# diferencial `lr_backbone_full=2e-5` y label smoothing 0.1. Resultados:
-#
-# | Backbone | §13 (freeze + last stage) | §16.A (full-ft) | Δ acc |
-# |---|---|---|---|
-# | ResNet18            | acc=0.845, dice=0.810 | 0.738 / 0.635 | **-0.107** |
-# | MobileNetV3-small   | acc=0.798, dice=0.832 | 0.702 / 0.790 | -0.096 |
-# | EfficientNet-B0     | acc=0.821, dice=0.847 | 0.679 / 0.799 | -0.142 |
-#
-# **Conclusión defendible:** con solo 336 samples, descongelar todo el backbone provoca **catastrophic
-# forgetting** ([McCloskey & Cohen 1989](https://doi.org/10.1016/S0079-7421(08)60536-8)) — el modelo
-# destruye el prior de ImageNet antes de aprender el dominio nuevo. La estrategia freeze+partial-unfreeze
-# de §13 es la correcta para este régimen de datos. **Los ckpt de §13 (`p5_*.pt`) se conservan como los
-# mejores modelos base.**
-#
-# Se preserva el código por si el compañero quiere reproducirlo (cambiar el `if False`).
+# **Resultado:** completar después de ejecutar esta comparación. Esta variante permanece desactivada
+# por defecto y no forma parte de la evidencia obligatoria de la rúbrica.
 
 # %%
 if False:  # descartado — mantener como registro histórico
@@ -1841,7 +1888,7 @@ if False:  # descartado — mantener como registro histórico
     for backbone in ['resnet18', 'mobilenet_v3_small', 'efficientnet_b0']:
         cfg = ExpConfig(**{**BASE_P16, 'name': f'p16_{backbone}_full', 'model_kind': backbone})
         register(train_one_config(cfg, df_tr, df_val, verbose=False))
-print("§16.A conclusión: usar los ckpt p5_* de §13 (freeze+partial) como base del ensemble.")
+print("§16.A no se ejecuta por defecto; no se infiere una conclusión sin métricas nuevas.")
 
 # %% [markdown]
 # ### §16.B — Ensemble top-3 backbones (promedio logits + bbox con TTA hflip)
@@ -1959,7 +2006,7 @@ if RUN_OPTIMIZATION and len([r for r in EXPERIMENTS_LOG if r['name'].startswith(
         'xmax': xyxy[:,2].round().int().tolist(),
         'ymax': xyxy[:,3].round().int().tolist(),
     })
-    sub_ens.to_csv(OUT_DIR / 'submission_ensemble.csv', index=False)
+    save_submission(sub_ens, OUT_DIR / 'submission_ensemble.csv', df_test)
     print(f"\n✓ submission_ensemble.csv escrita ({len(sub_ens)} filas)")
 else:
     print("(§16.B saltado — requiere ≥3 modelos p16_* de §16.A)")
@@ -1976,7 +2023,7 @@ else:
 # ensemble ya está bien entrenada. Estándar en Kaggle competitions.
 
 # %%
-PSEUDO_CONFIDENCE_THRESHOLD = 0.80  # bajado de 0.95 → 0.80 tras ver que solo 3/106 pasaban 0.95
+PSEUDO_CONFIDENCE_THRESHOLD = 0.80
 
 if RUN_OPTIMIZATION and 'ens_test' in dir():
     # Filtrar test predictions por confidence
@@ -2032,7 +2079,7 @@ if RUN_OPTIMIZATION and 'ens_test' in dir():
             'xmax': xyxy_f[:,2].round().int().tolist(),
             'ymax': xyxy_f[:,3].round().int().tolist(),
         })
-        sub_final.to_csv(OUT_DIR / 'submission_pseudo_final.csv', index=False)
+        save_submission(sub_final, OUT_DIR / 'submission_pseudo_final.csv', df_test)
         print(f"\n✓ submission_pseudo_final.csv escrita")
     else:
         print(f"Muy pocos pseudo-labels ({n_pseudo}) — no se aplica.")
@@ -2302,14 +2349,15 @@ if RUN_OPTIMIZATION:
     snap_test = ensemble_predict(snap_models, df_test, 224, True)
     xyxy = cxcywh_norm_to_xyxy(torch.tensor(snap_test['bbox_norm']), IMG_W, IMG_H)
     xyxy[:, 0::2].clamp_(0, IMG_W); xyxy[:, 1::2].clamp_(0, IMG_H)
-    pd.DataFrame({
+    sub_snapshot = pd.DataFrame({
         'filename': snap_test['filenames'],
         'class': [IDX2CLS[p] for p in snap_test['preds']],
         'xmin': xyxy[:,0].round().int().tolist(),
         'ymin': xyxy[:,1].round().int().tolist(),
         'xmax': xyxy[:,2].round().int().tolist(),
         'ymax': xyxy[:,3].round().int().tolist(),
-    }).to_csv(OUT_DIR / 'submission_snapshot.csv', index=False)
+    })
+    save_submission(sub_snapshot, OUT_DIR / 'submission_snapshot.csv', df_test)
     print(f"✓ submission_snapshot.csv escrita")
 
 # %% [markdown]
@@ -2358,23 +2406,27 @@ if RUN_OPTIMIZATION and 'models_ens' in dir() and 'snap_models' in dir():
     mega_test = multiscale_tta_predict(mega_models, weights, df_test, scales=[224, 288])
     xyxy = cxcywh_norm_to_xyxy(torch.tensor(mega_test['bbox_norm']), IMG_W, IMG_H)
     xyxy[:, 0::2].clamp_(0, IMG_W); xyxy[:, 1::2].clamp_(0, IMG_H)
-    pd.DataFrame({
+    sub_mega = pd.DataFrame({
         'filename': mega_test['filenames'],
         'class': [IDX2CLS[p] for p in mega_test['preds']],
         'xmin': xyxy[:,0].round().int().tolist(),
         'ymin': xyxy[:,1].round().int().tolist(),
         'xmax': xyxy[:,2].round().int().tolist(),
         'ymax': xyxy[:,3].round().int().tolist(),
-    }).to_csv(OUT_DIR / 'submission_mega_ensemble.csv', index=False)
+    })
+    save_submission(sub_mega, OUT_DIR / 'submission_mega_ensemble.csv', df_test)
     print(f"✓ submission_mega_ensemble.csv escrita")
 
 # %% [markdown]
 # ### §17.E — Comparativa evolutiva final
 
 # %%
-print("=== EVOLUCIÓN DEL MEJOR MODELO ===\n")
-try: print(f"  §10 CustomCNN baseline           acc≈0.46  dice≈0.28")
-except: pass
+print("=== EVOLUCIÓN DEL MEJOR MODELO (solo resultados de esta ejecución) ===\n")
+try:
+    p1_logged = next(r for r in EXPERIMENTS_LOG if r['name'] == 'p1_custom_baseline')
+    print(f"  §10 CustomCNN baseline           acc={p1_logged['best']['val_acc']:.4f}  dice={p1_logged['best']['val_dice']:.4f}")
+except StopIteration:
+    print("  §10 CustomCNN baseline           pendiente de ejecución")
 try: print(f"  §13 mejor pretrained             acc={max((r for r in EXPERIMENTS_LOG if r['name'].startswith('p5_') and 'fold' not in r['name']), key=lambda r: r['best']['val_dice'])['best']['val_acc']:.4f}  dice={max((r for r in EXPERIMENTS_LOG if r['name'].startswith('p5_') and 'fold' not in r['name']), key=lambda r: r['best']['val_dice'])['best']['val_dice']:.4f}")
 except: pass
 try: print(f"  §16.B ensemble simple            acc={ens_acc:.4f}  dice={ens_dice:.4f}")
@@ -2386,7 +2438,7 @@ except NameError: pass
 
 # %% [markdown]
 # ---
-# ## §18. Two-stage: bbox → crop → classify (el salto a 98% acc)
+# ## §18. Two-stage: bbox → crop → classify (opcional)
 #
 # **Insight del análisis de errores del §17:** el clasificador ve la imagen entera 224×224 con el
 # conductor ocupando ~10% del área. La mayor parte de los píxeles son fondo (habitáculo, ventanas)
@@ -2402,7 +2454,7 @@ except NameError: pass
 # - **Train de stage 2:** se recorta usando el bbox **GT** del train (no se propaga error del stage 1 al training).
 # - **Val / test:** se recorta usando el bbox **predicho** por stage 1 (evaluación realista end-to-end).
 #
-# **Resultado (val 84 samples):** val_acc = **0.9881** (83/84 correct). Salto de +12pp vs mega ensemble.
+# **Resultado:** completar después de ejecutar esta sección opcional.
 #
 # El código canónico está en [`tools/two_stage.py`](tools/two_stage.py) y ya generó `submission_two_stage.csv`.
 # Aquí se integra al notebook.
@@ -2652,7 +2704,7 @@ if RUN_OPTIMIZATION:
         'xmax': df_test_predicted['xmax'].tolist(),
         'ymax': df_test_predicted['ymax'].tolist(),
     })
-    sub_two_stage.to_csv(OUT_DIR / 'submission_two_stage.csv', index=False)
+    save_submission(sub_two_stage, OUT_DIR / 'submission_two_stage.csv', df_test)
     print(f"\n✓ submission_two_stage.csv escrita ({len(sub_two_stage)} filas)")
     print(f"  Distribución: {sub_two_stage['class'].value_counts().to_dict()}")
 
@@ -2671,25 +2723,17 @@ if RUN_OPTIMIZATION:
 # 1. **Anti-fuga:** train usa GT bbox (label limpio), val/test usan bbox predicho (evalúa end-to-end honesto).
 # 2. **Margen 15%:** preserva contexto (postura del conductor, no solo cara). Sin margen, el clasificador
 #    pierde señal cuando el bbox es imperfecto.
-# 3. **Val n=84:** un error = 1.2%. El resultado 0.9881 (1 error) puede tener varianza — considerar
-#    validación k-fold sobre stage 2 antes de reportar como resultado final.
+# 3. Con validación pequeña, interpretar el resultado observado con cautela y considerar
+#    validación k-fold sobre stage 2 antes de reportarlo.
 #
-# **Comparativa evolutiva:**
-#
-# | Etapa | val_acc | val_dice |
-# |---|---|---|
-# | §10 CustomCNN baseline | 0.464 | 0.280 |
-# | §13 mejor pretrained (EffNet-B0) | 0.821 | 0.847 |
-# | §16.B ensemble simple | 0.845 | 0.874 |
-# | §17.D mega v2 (weighted + multi-scale) | 0.869 | 0.879 |
-# | **§18 two-stage** | **0.988** | 0.879 |
+# **Resultado:** completar la comparativa con las métricas reales generadas por el notebook.
 
 # %% [markdown]
 # ---
 # ## §19. Matriz de robustez — cómo se comporta el modelo bajo condiciones adversas
 #
-# **Motivación:** el val_acc del §18 (0.988) se mide sobre imágenes del mismo video con
-# condiciones controladas. En producción real el conductor puede estar en un túnel, con
+# **Motivación:** la métrica del §18 se mide sobre imágenes del mismo video y puede no representar
+# condiciones de producción. En producción real el conductor puede estar en un túnel, con
 # gafas de sol, con sombra de la visera, etc. Esta sección aplica **10 condiciones sintéticas**
 # a las imágenes del val set y reporta accuracy bajo cada una — evidencia dura para la
 # sustentación de que el modelo (o no) generaliza al caso real.
@@ -2834,7 +2878,7 @@ else:
 # ### §19.B — Interpretación de la matriz
 #
 # **Cómo defender los resultados en la sustentación:**
-# - `baseline_clean` es la referencia (0.988 esperado).
+# - `baseline_clean` es la referencia observada después de ejecutar la sección.
 # - Caídas de <5pp = **modelo robusto** a esa condición.
 # - Caídas de 5-15pp = **degradación aceptable**, mencionar como límite conocido.
 # - Caídas >15pp = **debilidad crítica**, mencionar como trabajo futuro.
@@ -2858,23 +2902,18 @@ else:
 # | Sección | Estado | Notas |
 # |---|---|---|
 # | §1-9 | ✓ Implementado y probado | Columna vertebral (setup, EDA, split, dataset, metrics, losses, modelos, `train_one_config`) |
-# | §10 | ✓ Implementado, ejecuta por defecto | Baseline `CustomCNN` (~5 min en CPU) — registra en `EXPERIMENTS_LOG` |
-# | §11-13 | ✓ Implementado, protegido por flag | Barridos hyperparam + aug ablation + 3 backbones (~2h con flag ON) |
+# | §10 | ✓ Implementado, ejecuta en Run All | Baseline `CustomCNN` — registra en `EXPERIMENTS_LOG` |
+# | §11-13 | ✓ Implementado, ejecuta en Run All | Barridos hyperparam + aug ablation + 3 backbones |
 # | §14 | ✓ Implementado, adaptativo | K-fold requiere ≥3 exp; interpretabilidad + galería + t-SNE corren con solo §10 |
 # | §15 | ✓ Implementado, adaptativo | Genera `submission.csv` usando el mejor experimento en `EXPERIMENTS_LOG` |
 # | §16 | ✓ Implementado (RUN_OPTIMIZATION) | Full-ft descartado, ensemble simple, pseudo-labeling |
 # | §17 | ✓ Implementado (RUN_OPTIMIZATION) | Grid search 3D + Optuna + snapshot ensemble + mega multi-scale |
-# | §18 | ✓ **Implementado — resultado final val_acc=0.988** | Two-stage bbox→crop→classify (R-CNN pattern) |
+# | §18 | ✓ Implementado, opcional | Two-stage bbox→crop→classify (R-CNN pattern) |
 #
 # ### Cómo el compañero prueba el pipeline
 #
-# **Opción A — Verificar que todo funciona (~7 min):**
-# 1. `RUN_HEAVY_EXPERIMENTS = False` en §1 (default).
-# 2. Kernel > Restart & Run All.
-# 3. §10 entrena baseline, §14 genera visualizaciones + Grad-CAM + t-SNE, §15 escribe `submission.csv`.
-#
-# **Opción B — Reproducir todos los experimentos de la rúbrica (~2-3h CPU):**
-# 1. `RUN_HEAVY_EXPERIMENTS = True` en §1.
+# **Ejecución de la rúbrica:**
+# 1. `RUN_HEAVY_EXPERIMENTS = True` en §1 (valor predeterminado).
 # 2. Kernel > Restart & Run All.
 # 3. Corren los 9 experimentos de §11, los 3 de §12, los 3 de §13, y k-fold sobre top-3 en §14.
 # 4. §15 escribe `submission.csv` con el mejor de todos.
